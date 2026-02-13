@@ -1,9 +1,10 @@
 import math
+#units are...? 
+L = int(100) 
+W = int(70)
+rows = int(W/2)
 
-L = 100 
-W = 70
-
-def draw_soccer_pitch(L=100.0, W=70.0, cols=100, rows=35):
+def draw_soccer_pitch(L, W, cols=L, rows= rows):
     grid = [[' ' for _ in range(cols)] for _ in range(rows)]
     
     def to_grid(x, y):
