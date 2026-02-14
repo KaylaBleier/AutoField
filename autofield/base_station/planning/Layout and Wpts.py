@@ -1,5 +1,5 @@
 import math
-#units are...? 
+#units are meters
 L = int(100) 
 W = int(70)
 rows = int(W/2)
