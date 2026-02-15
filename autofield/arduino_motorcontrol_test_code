@@ -1,0 +1,4 @@
+# control chain
+# Arduino → (small control signals) → MD30C driver → (high power switching) → Motor → (mechanical motion)
+
+
