@@ -1,12 +1,17 @@
 const int potpin = A0; //analog pin used to connect the center pin of potentiometer
 
-// connections to arduino
+// connections to arduino, back wheels
 int pwmpin_backleft = 3;
 int pwmpin_backright = 5;
 int dirpin_backleft = 2;
 int dirpin_backright = 4;
 
-// ADD for 4 motors, set variables for each wheel for pwp and direction
+// arduino connections, front wheels
+int pwmpin_frontleft = 9;
+int pwmpin_frontright = 7;
+int dirpin_frontleft = 8;
+int dirpin_frontright = 6;
+
 
 int pwmpin_val;
 
@@ -22,7 +27,11 @@ void setup() {
   pinMode(dirpin_backright, OUTPUT);
 
  // ADD front wheel pwm and direction outputs
+  pinMode(pwmpin_frontleft, OUTPUT);
+  pinMode(pwmpin_frontright, OUTPUT);
 
+  pinMode(dirpin_frontleft, OUTPUT);
+  pinMode(dirpin_frontright, OUTPUT);
 
   Serial.begin(9600);
 
@@ -42,7 +51,15 @@ void loop() {
 
   // ADD for front wheels
 
+  //allows wheels to run opposite direction
+  digitalWrite(dirpin_frontleft, HIGH); 
+  digitalWrite(dirpin_frontright, HIGH); 
+
+  analogWrite(pwmpin_frontleft, pwmpin_val);
+  analogWrite(pwmpin_frontright, pwmpin_val);
+
   Serial.print("Motor speed pwm command: ");
   Serial.print(pwmpin_val);
   Serial.println();
 }
+
