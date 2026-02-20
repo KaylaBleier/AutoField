@@ -1,0 +1,8 @@
+motor_mode: terminal      # terminal | serial
+turn_gain: 1.0
+print_hz: 10
+
+# later, when you have Arduino:
+# serial_port: /dev/ttyACM0
+# serial_baud: 115200
+# serial_timeout: 0.02
