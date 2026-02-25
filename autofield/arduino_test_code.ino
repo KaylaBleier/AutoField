@@ -1,28 +1,50 @@
-#define PWM_PIN 5
-#define DIR_PIN 4
+import serial
+import time
 
-void setup() {
-  pinMode(PWM_PIN, OUTPUT);
-  pinMode(DIR_PIN, OUTPUT);
-}
+SERIAL_PORT = "/dev/cu.usbmodem101"
+BAUD_RATE = 9600
 
-void loop() {
+# measured experimentally
+SPEED_MPS = 1  # <-- replace with your measured value
 
-  // Forward slow
-  digitalWrite(DIR_PIN, HIGH);
-  analogWrite(PWM_PIN, 100);
-  delay(3000);
+ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
+time.sleep(2)
 
-  // Stop
-  analogWrite(PWM_PIN, 0);
-  delay(2000);
+def send(vL, vR):
+    cmd = f"{vL},{vR}\n"
+    ser.write(cmd.encode())
+    print("Sending:", cmd.strip())
 
-  // Reverse slow
-  digitalWrite(DIR_PIN, LOW);
-  analogWrite(PWM_PIN, 100);
-  delay(3000);
+L = float(input("Enter rectangle length (meters): "))
+W = float(input("Enter rectangle width (meters): "))
 
-  // Stop
-  analogWrite(PWM_PIN, 0);
-  delay(4000);
-}
+time_L = L / SPEED_MPS
+time_W = W / SPEED_MPS
+
+print("\n=== STARTING RECTANGLE DRY RUN ===")
+
+# Side 1
+send(0.4, 0.4)
+time.sleep(time_L)
+send(0, 0)
+input("Rotate rover 90° manually, then press ENTER...")
+
+# Side 2
+send(0.4, 0.4)
+time.sleep(time_W)
+send(0, 0)
+input("Rotate rover 90° manually, then press ENTER...")
+
+# Side 3
+send(0.4, 0.4)
+time.sleep(time_L)
+send(0, 0)
+input("Rotate rover 90° manually, then press ENTER...")
+
+# Side 4
+send(0.4, 0.4)
+time.sleep(time_W)
+send(0, 0)
+
+print("=== RECTANGLE COMPLETE ===")
+ser.close()
