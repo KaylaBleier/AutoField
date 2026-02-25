@@ -1,50 +1,64 @@
-import serial
-import time
+// ===== Motor Pins =====
 
-SERIAL_PORT = "/dev/cu.usbmodem101"
-BAUD_RATE = 9600
+// Back wheels
+int pwmpin_backleft = 3;
+int pwmpin_backright = 5;
+int dirpin_backleft = 2;
+int dirpin_backright = 4;
 
-# measured experimentally
-SPEED_MPS = 1  # <-- replace with your measured value
+// Front wheels
+int pwmpin_frontleft = 9;
+int pwmpin_frontright = 6;
+int dirpin_frontleft = 8;
+int dirpin_frontright = 10;
 
-ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
-time.sleep(2)
+void setup() {
+  pinMode(pwmpin_backleft, OUTPUT);
+  pinMode(pwmpin_backright, OUTPUT);
+  pinMode(dirpin_backleft, OUTPUT);
+  pinMode(dirpin_backright, OUTPUT);
 
-def send(vL, vR):
-    cmd = f"{vL},{vR}\n"
-    ser.write(cmd.encode())
-    print("Sending:", cmd.strip())
+  pinMode(pwmpin_frontleft, OUTPUT);
+  pinMode(pwmpin_frontright, OUTPUT);
+  pinMode(dirpin_frontleft, OUTPUT);
+  pinMode(dirpin_frontright, OUTPUT);
 
-L = float(input("Enter rectangle length (meters): "))
-W = float(input("Enter rectangle width (meters): "))
+  Serial.begin(9600);
+}
 
-time_L = L / SPEED_MPS
-time_W = W / SPEED_MPS
+void setMotor(int pwmPin, int dirPin, float velocity) {
+  int pwm = abs(velocity) * 255;
+  pwm = constrain(pwm, 0, 255);
 
-print("\n=== STARTING RECTANGLE DRY RUN ===")
+  if (velocity >= 0)
+    digitalWrite(dirPin, HIGH);
+  else
+    digitalWrite(dirPin, LOW);
 
-# Side 1
-send(0.4, 0.4)
-time.sleep(time_L)
-send(0, 0)
-input("Rotate rover 90° manually, then press ENTER...")
+  analogWrite(pwmPin, pwm);
+}
 
-# Side 2
-send(0.4, 0.4)
-time.sleep(time_W)
-send(0, 0)
-input("Rotate rover 90° manually, then press ENTER...")
+void loop() {
 
-# Side 3
-send(0.4, 0.4)
-time.sleep(time_L)
-send(0, 0)
-input("Rotate rover 90° manually, then press ENTER...")
+  if (Serial.available()) {
 
-# Side 4
-send(0.4, 0.4)
-time.sleep(time_W)
-send(0, 0)
+    String line = Serial.readStringUntil('\n');
+    line.trim();
 
-print("=== RECTANGLE COMPLETE ===")
-ser.close()
+    int commaIndex = line.indexOf(',');
+
+    if (commaIndex > 0) {
+
+      float vL = line.substring(0, commaIndex).toFloat();
+      float vR = line.substring(commaIndex + 1).toFloat();
+
+      // LEFT side motors
+      setMotor(pwmpin_backleft, dirpin_backleft, vL);
+      setMotor(pwmpin_frontleft, dirpin_frontleft, vL);
+
+      // RIGHT side motors
+      setMotor(pwmpin_backright, dirpin_backright, vR);
+      setMotor(pwmpin_frontright, dirpin_frontright, vR);
+    }
+  }
+}
