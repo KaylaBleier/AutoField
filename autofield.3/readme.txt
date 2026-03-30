@@ -7,7 +7,7 @@ This test is for using your laptop on the rover to collect precision data. Only 
 1) load arduino code to arduino WITH POWER TO MOTORS OFF
 2) power system on, attach computer to rover GPS and arduino
 3) open device manager & note what port each item is connected to. Take note of Baud rate too but it should be 57600
-4) run in your terminal -python main.py (once you're loaded in to the autofield.3 folder)
+4) run in your terminal "py main.py" (once you're loaded in to the autofield.3 folder)
 5) enter requested information 
 6) put laptop on rover and let it rip!
 
