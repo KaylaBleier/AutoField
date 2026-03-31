@@ -55,6 +55,42 @@ float rpm_BR = 0;
 
 
 // ------------------------------------------------------------
+// PID CONTROL VARIABLES (P ONLY ACTIVE — I & D COMMENTED OUT)
+// ------------------------------------------------------------
+float targetRPM = 120.0;
+
+float Kp = 1.0;
+// float Ki = 0.00;   // <--- INTEGRAL (disabled for now)
+// float Kd = 0.00;   // <--- DERIVATIVE (disabled for now)
+
+int PWM_BL = 3;
+int PWM_FL = 5;
+int PWM_FR = 6;
+int PWM_BR = 9;
+
+int pwm_BL = 0;
+int pwm_FL = 0;
+int pwm_FR = 0;
+int pwm_BR = 0;
+
+// Integral accumulators (commented out)
+/*
+float integral_BL = 0;
+float integral_FL = 0;
+float integral_FR = 0;
+float integral_BR = 0;
+*/
+
+// Last errors for derivative (commented out)
+/*
+float lastError_BL = 0;
+float lastError_FL = 0;
+float lastError_FR = 0;
+float lastError_BR = 0;
+*/
+
+
+// ------------------------------------------------------------
 // SETUP
 // ------------------------------------------------------------
 void setup() {
@@ -62,6 +98,11 @@ void setup() {
   pinMode(LED_FL, OUTPUT);
   pinMode(LED_FR, OUTPUT);
   pinMode(LED_BR, OUTPUT);
+
+  pinMode(PWM_BL, OUTPUT);
+  pinMode(PWM_FL, OUTPUT);
+  pinMode(PWM_FR, OUTPUT);
+  pinMode(PWM_BR, OUTPUT);
 
   Serial.begin(9600);
 }
@@ -160,7 +201,6 @@ void loop() {
   if (!magnetDetected_BR && magnetPresent_BR) magnetPresent_BR = false;
 
 
-
   // ------------------------------------------------------------
   // SERIAL OUTPUT (4 wheels on one line)
   // ------------------------------------------------------------
@@ -191,6 +231,64 @@ void loop() {
   Serial.print(passCount_BR);
   Serial.print(" RPM:");
   Serial.println(rpm_BR, 1);
+
+
+  // ------------------------------------------------------------
+  // PROPORTIONAL MOTOR CONTROL (I & D COMMENTED OUT)
+  // ------------------------------------------------------------
+
+  float error_BL = targetRPM - rpm_BL;
+  float error_FL = targetRPM - rpm_FL;
+  float error_FR = targetRPM - rpm_FR;
+  float error_BR = targetRPM - rpm_BR;
+
+  // ---- Integral (disabled) ----
+  /*
+  integral_BL += error_BL;
+  integral_FL += error_FL;
+  integral_FR += error_FR;
+  integral_BR += error_BR;
+  */
+
+  // ---- Derivative (disabled) ----
+  /*
+  float derivative_BL = error_BL - lastError_BL;
+  float derivative_FL = error_FL - lastError_FL;
+  float derivative_FR = error_FR - lastError_FR;
+  float derivative_BR = error_BR - lastError_BR;
+  */
+
+  // ---- PID output (P only active) ----
+  float control_BL = Kp * error_BL; // + Ki * integral_BL + Kd * derivative_BL;
+  float control_FL = Kp * error_FL; // + Ki * integral_FL + Kd * derivative_FL;
+  float control_FR = Kp * error_FR; // + Ki * integral_FR + Kd * derivative_FR;
+  float control_BR = Kp * error_BR; // + Ki * integral_BR + Kd * derivative_BR;
+
+  // ---- Update PWM ----
+  pwm_BL += control_BL;
+  pwm_FL += control_FL;
+  pwm_FR += control_FR;
+  pwm_BR += control_BR;
+
+  // ---- Clamp ----
+  pwm_BL = constrain(pwm_BL, 0, 255);
+  pwm_FL = constrain(pwm_FL, 0, 255);
+  pwm_FR = constrain(pwm_FR, 0, 255);
+  pwm_BR = constrain(pwm_BR, 0, 255);
+
+  // ---- Write to motors ----
+  analogWrite(PWM_BL, pwm_BL);
+  analogWrite(PWM_FL, pwm_FL);
+  analogWrite(PWM_FR, pwm_FR);
+  analogWrite(PWM_BR, pwm_BR);
+
+  // ---- Save last errors for derivative (commented) ----
+  /*
+  lastError_BL = error_BL;
+  lastError_FL = error_FL;
+  lastError_FR = error_FR;
+  lastError_BR = error_BR;
+  */
 
   delay(10);
 }
