@@ -4,4 +4,4 @@ Then copy the folder here and the structure should make it easy to open and run 
 
 # Dowload the Arduino folder here
 The structure is all set up 🫡🫡
-compressed to a ZIP for easier upload
+compressed to a ZIP for easier upload --> moved to the Drive since it was too big to upload here
