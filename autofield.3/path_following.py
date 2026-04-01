@@ -14,9 +14,16 @@ Outputs (via serial to Arduino):
 
 Motor direction is handled by the Arduino high/low direction pins.
 Left-side and right-side motors always receive the same PWM value.
+
+Servo is driven directly from the Raspberry Pi GPIO (not Arduino).
+  - ARM ON  → servo moves to 40° (paint arm down)
+  - ARM OFF → servo sweeps to 67° then signal is cut (arm lifts, stays off)
 """
 
 import math
+import time
+
+import RPi.GPIO as GPIO
 
 
 # ---------------------------------------------------------------------------
@@ -275,12 +282,111 @@ class PathFollower:
     # ------------------------------------------------------------------
     # Paint arm logic
     # ------------------------------------------------------------------
+    #
+    # The servo is driven directly from a Raspberry Pi GPIO pin using
+    # hardware PWM (50 Hz). Duty cycle is mapped from angle in degrees:
+    #
+    #   duty = 2.5 + (angle / 180.0) * 10.0
+    #
+    # which gives ~2.5% at 0° and ~12.5% at 180°, matching most
+    # standard hobby servos.
+    #
+    # Behaviour:
+    #   arm_on()  → move to SERVO_ANGLE_ON  (40°) — paint arm down
+    #   arm_off() → sweep to SERVO_ANGLE_OFF (67°) step-by-step,
+    #               then immediately cut the PWM signal so the servo
+    #               holds position passively and draws no current.
+    #
+    # Call servo_setup() once before the control loop and
+    # servo_cleanup() on exit to release the GPIO pin.
+    # ------------------------------------------------------------------
+
+    SERVO_GPIO_PIN   = 18          # BCM pin — change to match your wiring
+    SERVO_PWM_FREQ   = 50          # Hz — standard for hobby servos
+    SERVO_ANGLE_ON   = 40          # degrees — paint arm down
+    SERVO_ANGLE_OFF  = 67          # degrees — paint arm up / parked
+    SERVO_SWEEP_STEP = 1           # degrees per step during off-sweep
+    SERVO_SWEEP_DELAY = 0.015      # seconds between steps (≈ 15 ms, matches Arduino test)
+
+    _servo_pwm       = None        # RPi.GPIO PWM instance (class-level singleton)
+    _servo_active    = False       # True while PWM signal is running
+    _arm_state       = False       # Last commanded arm state
+
+    @staticmethod
+    def _angle_to_duty(angle_deg: float) -> float:
+        """Convert servo angle (0–180°) to duty cycle (%) for 50 Hz PWM."""
+        return 2.5 + (angle_deg / 180.0) * 10.0
+
+    @classmethod
+    def servo_setup(cls):
+        """Initialise GPIO and start PWM. Call once before the control loop."""
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(cls.SERVO_GPIO_PIN, GPIO.OUT)
+        cls._servo_pwm = GPIO.PWM(cls.SERVO_GPIO_PIN, cls.SERVO_PWM_FREQ)
+        # Start with PWM stopped (duty=0); arm_on/arm_off will activate it
+        cls._servo_pwm.start(0)
+        cls._servo_active = False
+        cls._arm_state = False
+
+    @classmethod
+    def servo_cleanup(cls):
+        """Stop PWM and release GPIO. Call on exit."""
+        if cls._servo_pwm is not None:
+            cls._servo_pwm.stop()
+        GPIO.cleanup()
+        cls._servo_active = False
+
+    @classmethod
+    def arm_on(cls):
+        """
+        Move servo to SERVO_ANGLE_ON (40°) — paint arm down.
+        Activates the PWM signal if it was previously cut.
+        """
+        if cls._arm_state:
+            return  # already on, nothing to do
+
+        duty = cls._angle_to_duty(cls.SERVO_ANGLE_ON)
+        cls._servo_pwm.ChangeDutyCycle(duty)
+        cls._servo_active = True
+        cls._arm_state = True
+
+    @classmethod
+    def arm_off(cls):
+        """
+        Sweep servo from SERVO_ANGLE_ON (40°) to SERVO_ANGLE_OFF (67°),
+        then immediately cut the PWM signal (duty = 0) so the servo
+        holds its position passively without drawing current.
+        """
+        if not cls._arm_state:
+            return  # already off, nothing to do
+
+        # Step from current on-position up to the off-position
+        for angle in range(cls.SERVO_ANGLE_ON, cls.SERVO_ANGLE_OFF + 1,
+                           cls.SERVO_SWEEP_STEP):
+            cls._servo_pwm.ChangeDutyCycle(cls._angle_to_duty(angle))
+            time.sleep(cls.SERVO_SWEEP_DELAY)
+
+        # Cut signal — servo holds 67° passively
+        cls._servo_pwm.ChangeDutyCycle(0)
+        cls._servo_active = False
+        cls._arm_state = False
+
     def paint_arm_active(self, t):
         """
         Paint arm is ON while the rover is between wp_a and wp_b
         (0 <= t <= 1). Extend this with more nuanced logic as needed.
         """
         return 0.0 <= t <= 1.0
+
+    def update_paint_arm(self, active: bool):
+        """
+        Drive the servo to match the desired arm state.
+        Calls arm_on() or arm_off() only on state transitions.
+        """
+        if active:
+            self.arm_on()
+        else:
+            self.arm_off()
 
     # ------------------------------------------------------------------
     # Main step — call this at every control loop iteration
@@ -330,8 +436,9 @@ class PathFollower:
         # Wheel speeds
         pwm_L, pwm_R = self.compute_wheel_speeds(delta_t)
 
-        # Paint arm
+        # Paint arm — determine desired state and drive servo
         paint = self.paint_arm_active(t)
+        self.update_paint_arm(paint)
 
         return {
             "pwm_L": pwm_L,
@@ -360,6 +467,9 @@ if __name__ == "__main__":
     follower = PathFollower(waypoints)
     ser = open_serial()
 
+    # Initialise GPIO servo
+    PathFollower.servo_setup()
+
     # Seed with a starting position (first GPS fix)
     prev_P = waypoints[0]
 
@@ -386,4 +496,6 @@ if __name__ == "__main__":
         send_motor_commands(ser, 0, 0, False)
         print("Stopped.")
     finally:
+        PathFollower.arm_off()      # park servo before shutdown
+        PathFollower.servo_cleanup()
         ser.close()
