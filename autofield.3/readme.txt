@@ -1,5 +1,5 @@
 # Autofield Rover — Test Day
-This is a laptop-based run — once we confirm it working here we move to the Pi.
+This is a laptop-based run — once we confirm it working here we move to the Pi. This means someones laptop will need to be on the rover & running the code. Its safe, I did it, dw. 
 ---
 
 ## Setup
