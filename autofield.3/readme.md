@@ -1,6 +1,7 @@
 # Autofield Rover — Test Day
 This is a laptop-based run — once we confirm it working here we move to the Pi. This means someones laptop will need to be on the rover & running the code. Its safe, I did it, dw. 
 ---
+also all Arduino code is now within 'screen_code' folder & in the Drive
 
 ## Setup
 Download `autofield.3` and open a terminal inside it. Pull the Arduino files out and move them into your Arduino sketchbook (`Documents/Arduino/rover_combined/rover_control_4.ino`).
