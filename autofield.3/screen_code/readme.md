@@ -2,6 +2,6 @@
 I'd reccomend making a copy of your Arduino folder (that gets created when you download the IDE) and save it to your desktop
 Then copy the folder here and the structure should make it easy to open and run without issue
 
-# Dowload the Arduino folder here
+# Dowload the Arduino folder here https://drive.google.com/file/d/1cgGodQ53Zb1sHAHSOaOvpdaxyKCjckyK/view?usp=drive_link
 The structure is all set up 🫡🫡
 compressed to a ZIP for easier upload --> moved to the Drive since it was too big to upload here
