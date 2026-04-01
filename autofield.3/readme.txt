@@ -13,3 +13,5 @@ This test is for using your laptop on the rover to collect precision data. Only 
 
 If it doens't stop when it reaches destination, stop the system by unplugging arduino 
 IF you need to stop the system at any point in set up, press ctrl+c
+
+FOR A QUICK TEST ONLY RUN test_dummy_rover.py 
