@@ -1,17 +1,74 @@
-the folder "autofield.3" is a copy of the code I have on laptop with the most updated and necessary code for path planning & path following
+# Autofield Rover — Test Day
+This is a laptop-based run — once we confirm it working here we move to the Pi.
+---
 
-To run the code, download the folder and navigate to it in your terminal. Move out the arduino code. 
-Be sure the arduino code is properly placed in ARDUINO folder (you should have from downloading the Arduino IDE). 
+## Setup
+Download `autofield.3` and open a terminal inside it. Pull the Arduino files out and move them into your Arduino sketchbook (`Documents/Arduino/rover_combined/rover_control_4.ino`).
+---
 
-This test is for using your laptop on the rover to collect precision data. Only once we confirm it working do we move it onto the Pi. 
-1) load arduino code to arduino WITH POWER TO MOTORS OFF
-2) power system on, attach computer to rover GPS and arduino
-3) open device manager & note what port each item is connected to. Take note of Baud rate too but it should be 57600
-4) run in your terminal "py main.py" (once you're loaded in to the autofield.3 folder)
-5) enter requested information 
-6) put laptop on rover and let it rip!
+## 1. Load the Arduino sketch
+> ⚠️ Motors off for this step.
 
-If it doens't stop when it reaches destination, stop the system by unplugging arduino 
-IF you need to stop the system at any point in set up, press ctrl+c
+Open `rover_coontrol_4.ino` in the Arduino IDE, select **Tools → Board → Arduino Uno**, pick the right port, and upload.
 
-FOR A QUICK TEST ONLY RUN test_dummy_rover_2.py 
+---
+
+## 2. Find your COM ports
+Open Device Manager and note the port for each device when plugged in:
+
+| Device | Expected port | Baud |
+|---|---|---|
+| GPS receiver | COM5 | 57600 |
+| Arduino | COM15 | 9600 |
+
+If yours differ, update `GNSS_PORT` in `main.py` and `SERIAL_PORT` in `path_following.py` before running.
+
+---
+
+## 3. Full run
+Power everything on, give the GPS a minute outside to get a fix, then:
+
+```
+py main.py
+```
+
+The script will prompt you through the rest — orient the rover, press Enter to record the start position, enter a line length, press Enter to go. Put the laptop on the rover and let it run.
+
+**To stop at any point:** `Ctrl+C`
+
+**If it doesn't stop at the destination:** unplug the Arduino — the onboard watchdog cuts the motors within 0.5 s.
+
+---
+
+## 4. Quick test
+For a fast check without the full startup sequence:
+
+```
+py test_dummy_rover.py
+```
+
+Choose **option 3**. The ports and line length are pre-filled — just press Enter through the prompts. If the Arduino fails to connect it'll warn you and keep running in print-only mode so you can still check the GPS and path logic.
+
+All runs log to a timestamped CSV in `track_logs/`.
+
+---
+
+## Troubleshooting
+**"Cannot open GPS port"** — wrong COM number. Update `GNSS_PORT` in `main.py`.
+
+**"Could not arm Arduino"** — wrong port or sketch not uploaded. Check Device Manager and re-upload if needed.
+
+**Motors don't spin** — check motor power is on. Open Serial Monitor in the Arduino IDE (9600 baud) and confirm you see `READY` on boot.
+
+**`py` not recognised** — try `python` or `python3`.
+
+---
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `main.py` | Run this for a full test |
+| `test_dummy_rover.py` | Quick test — use mode 3 for real hardware |
+| `rover_combined.ino` | Arduino sketch — upload before anything else |
+| `paint_analysis.py` | Post-run image analysis — run separately |
