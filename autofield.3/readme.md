@@ -19,8 +19,6 @@ To avoid any of that: make a copy of your existing Arduino folder (usually in `D
 **[Download the Arduino folder here](https://drive.google.com/file/d/1cgGodQ53Zb1sHAHSOaOvpdaxyKCjckyK/view?usp=drive_link)**
 *(it's a ZIP — extract and drop it in `Documents/`)*
 
-All the Arduino code is also in the `screen_code` folder if you need it.
-
 ---
 
 ## 1. Load the Arduino sketch
