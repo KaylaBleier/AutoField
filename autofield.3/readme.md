@@ -1,3 +1,4 @@
+# PLZ Read Me
 # Autofield Rover — Test Day
 
 This is a laptop-based run — once we confirm it working here we move to the Pi. This means someone's laptop will need to be on the rover and running the code. It's safe, I did it, dw.
