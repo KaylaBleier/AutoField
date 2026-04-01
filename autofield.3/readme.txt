@@ -44,12 +44,12 @@ The script will prompt you through the rest — orient the rover, press Enter to
 For a fast check without the full startup sequence:
 
 ```
-py test_dummy_rover.py
+py test_dummy_rover_2.py
 ```
 
 Choose **option 3**. The ports and line length are pre-filled — just press Enter through the prompts. If the Arduino fails to connect it'll warn you and keep running in print-only mode so you can still check the GPS and path logic.
 
-All runs log to a timestamped CSV in `track_logs/`.
+All runs log to a timestamped CSV in `track_logs/`. Don't worry, the data is saved. Just upload that folder to the drive after all testing is done. 
 
 ---
 
