@@ -1,16 +1,16 @@
 const int potpin = A0; //analog pin used to connect the center pin of potentiometer
 
-// connections to arduino, back wheels
+// connections to arduino, back wheels (pwm white, orange dir)
 int pwmpin_backleft = 3;
-int pwmpin_backright = 5;
+int pwmpin_backright = 7;
 int dirpin_backleft = 2;
-int dirpin_backright = 4;
+int dirpin_backright = 6;
 
 // arduino connections, front wheels
-int pwmpin_frontleft = 9;
-int pwmpin_frontright = 7;
-int dirpin_frontleft = 8;
-int dirpin_frontright = 6;
+int pwmpin_frontleft = 5;
+int pwmpin_frontright = 9;
+int dirpin_frontleft = 4;
+int dirpin_frontright = 8;
 
 
 int pwmpin_val;
