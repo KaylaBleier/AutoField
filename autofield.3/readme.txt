@@ -69,6 +69,6 @@ All runs log to a timestamped CSV in `track_logs/`.
 | File | Purpose |
 |---|---|
 | `main.py` | Run this for a full test |
-| `test_dummy_rover.py` | Quick test — use mode 3 for real hardware |
+| `test_dummy_rover_2.py` | Quick test — use mode 3 for real hardware |
 | `rover_combined.ino` | Arduino sketch — upload before anything else |
 | `paint_analysis.py` | Post-run image analysis — run separately |
