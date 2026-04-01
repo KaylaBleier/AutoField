@@ -92,3 +92,44 @@ All runs log to a timestamped CSV in `track_logs/`. The data is saved — just u
 | `test_dummy_rover_2.py` | Quick test — use mode 3 for real hardware |
 | `rover_control_4.ino` | Arduino sketch — upload before anything else |
 | `paint_analysis.py` | Post-run image analysis — run separately |
+
+--- 
+## Arduino pin map (`rover_control_4.ino`)
+ 
+### Motor PWM — speed signal to Cytron drivers
+*(must be hardware PWM pins — changed from original)*
+ 
+| Pin | Motor |
+|---|---|
+| 3 | Left front (LF) |
+| 5 | Left back (LB) |
+| 6 | Right front (RF) |
+| 11 | Right back (RB) |
+ 
+### Motor DIR — direction signal to Cytron drivers
+ 
+| Pin | Motor |
+|---|---|
+| 2 | Left front (LF) |
+| 4 | Left back (LB) |
+| 7 | Right front (RF) |
+| 8 | Right back (RB) |
+ 
+### Servo — paint arm
+ 
+| Pin | Function |
+|---|---|
+| 10 | Signal |
+| 12 | Reference (held LOW) |
+ 
+### Hall-effect encoders — analog inputs
+ 
+| Pin | Wheel |
+|---|---|
+| A0 | Front left (FL) |
+| A1 | Front right (FR) |
+| A4 | Back right (BR) |
+| A5 | Back left (BL) |
+ 
+> **Note:** All four DIR pins are held HIGH (forward only) for test day. The Arduino handles stopping — don't cut motor power to stop the rover, use `Ctrl+C` or unplug the Arduino.
+ 
