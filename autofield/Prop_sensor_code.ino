@@ -1,5 +1,6 @@
 // 4-WHEEL RPM MEASUREMENT + PROPORTIONAL CONTROL (P-ONLY)
 // 1 Magnet Pass = 1 Revolution
+//tuesday april 7, v3
 
 
 // ------------------------------------------------------------
@@ -24,9 +25,9 @@ int dirpin_frontright = 8;
 // ------------------------------------------------------------
 
 const int hallAnalogPin_BL = A5;
-const int hallAnalogPin_FL = A4;
+const int hallAnalogPin_FL = A0;
 const int hallAnalogPin_FR = A1;
-const int hallAnalogPin_BR = A0;
+const int hallAnalogPin_BR = A4;
 
 
 // ------------------------------------------------------------
@@ -40,10 +41,10 @@ float targetRPM = 45.0;
 // Start all equal, then adjust individually if needed
 // ------------------------------------------------------------
 
-float Kp_BL = 2.0;
-float Kp_FL = 0.5;
-float Kp_FR = 0.5;
-float Kp_BR = 0.5;
+float Kp_BL = 1.5;
+float Kp_FL = 1.5;
+float Kp_FR = 1.5;
+float Kp_BR = 1.5;
 
 
 // PWM outputs
@@ -138,7 +139,7 @@ void loop() {
   // ============================================================
 
   hallAnalog_BL = analogRead(hallAnalogPin_BL);
-  bool magnetDetected_BL = (hallAnalog_BL >= 220 && hallAnalog_BL <= 250);
+  bool magnetDetected_BL = (hallAnalog_BL >= 200 && hallAnalog_BL <= 290);
 
   static bool firstLoop_BL = true;
   if (firstLoop_BL) {
@@ -168,7 +169,7 @@ void loop() {
   // ============================================================
 
   hallAnalog_FL = analogRead(hallAnalogPin_FL);
-  bool magnetDetected_FL = (hallAnalog_FL >= 220 && hallAnalog_FL <= 250);
+  bool magnetDetected_FL = (hallAnalog_FL >= 200 && hallAnalog_FL <= 290);
 
   static bool firstLoop_FL = true;
   if (firstLoop_FL) {
@@ -198,7 +199,7 @@ void loop() {
   // ============================================================
 
   hallAnalog_FR = analogRead(hallAnalogPin_FR);
-  bool magnetDetected_FR = (hallAnalog_FR >= 220 && hallAnalog_FR <= 250);
+  bool magnetDetected_FR = (hallAnalog_FR >= 200 && hallAnalog_FR <= 290);
 
   static bool firstLoop_FR = true;
   if (firstLoop_FR) {
@@ -228,7 +229,7 @@ void loop() {
   // ============================================================
 
   hallAnalog_BR = analogRead(hallAnalogPin_BR);
-  bool magnetDetected_BR = (hallAnalog_BR >= 220 && hallAnalog_BR <= 250);
+  bool magnetDetected_BR = (hallAnalog_BR >= 200 && hallAnalog_BR <= 290);
 
   static bool firstLoop_BR = true;
   if (firstLoop_BR) {
