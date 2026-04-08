@@ -1,297 +1,162 @@
 #include <Servo.h>
 
-// ===========================================================================
-// PIN DEFINITIONS
-// ===========================================================================
+// ========================
+// CORRECT PIN DEFINITIONS
+// ========================
 
-const int LF_PWM = 5;
-const int LB_PWM = 3;
-const int RF_PWM = 9;
-const int RB_PWM = 6;
+// LEFT SIDE
+const int PWM_FL = 5;
+const int PWM_BL = 3;
+const int DIR_FL = 4;
+const int DIR_BL = 2;
 
-const int LF_DIR = 4;
-const int LB_DIR = 2;
-const int RF_DIR = 8;
-const int RB_DIR = 7;
+// RIGHT SIDE
+const int PWM_FR = 9;
+const int PWM_BR = 6;
+const int DIR_FR = 8;
+const int DIR_BR = 7;
 
-const int SERVO_SIG_PIN = 12;
-//const int SERVO_REF_PIN = 12;
-
-const int HALL_BL = A5;
-const int HALL_FL = A0;
-const int HALL_FR = A1;
-const int HALL_BR = A4;
-
-// ===========================================================================
-// SERVO
-// ===========================================================================
+// Servo
 Servo paintArm;
-const int SERVO_OFF_ANGLE = 0; //no paint
-const int SERVO_ON_ANGLE  = 29; //painting
-bool prevArmState = false;
+const int SERVO_PIN = 10;
 
-// ===========================================================================
-// SAFETY
-// ===========================================================================
-const unsigned long TIMEOUT_MS = 500;
-const unsigned long SERVO_MOVE_MS = 400;
-unsigned long lastCommandTime = 0;
-bool motorsStopped = true;
+// ========================
+// STATE
+// ========================
+
 bool armed = false;
+unsigned long lastCommandTime = 0;
+const unsigned long TIMEOUT_MS = 5000;
 
-// ================= NEW =================
-unsigned long lastEncSend = 0;
-const unsigned long ENC_INTERVAL_MS = 100;
-// =======================================
+// PWM values
+int pwm_FL = 0;
+int pwm_BL = 0;
+int pwm_FR = 0;
+int pwm_BR = 0;
 
-// ===========================================================================
-// CONTROL TUNING
-// ===========================================================================
-const int NUM_MAGNETS = 4;
-const float MAX_TARGET_RPM = 200.0f;
-const int PWM_MIN = 30;
 
-const int HALL_LOW  = 200;
-const int HALL_HIGH = 290;
-
-float Kp_BL = 1.5f;
-float Kp_FL = 1.5f;
-float Kp_FR = 1.5f;
-float Kp_BR = 1.5f;
-
-// ===========================================================================
-// WHEEL STRUCT
-// ===========================================================================
-struct WheelState {
-  int hallPin;
-  int pwmPin;
-  float Kp;
-
-  bool magnetPresent;
-  bool firstLoop;
-  unsigned long passCount;
-  unsigned long lastPassTime;
-  float rpm;
-
-  int pwm;
-  float targetRPM;
-};
-
-WheelState wheels[4] = {
-  { HALL_BL, LB_PWM, 0, false, true, 0, 0, 0, 0, 0 },
-  { HALL_FL, LF_PWM, 0, false, true, 0, 0, 0, 0, 0 },
-  { HALL_FR, RF_PWM, 0, false, true, 0, 0, 0, 0, 0 },
-  { HALL_BR, RB_PWM, 0, false, true, 0, 0, 0, 0, 0 },
-};
-
-// ===========================================================================
+// ========================
 // SETUP
-// ===========================================================================
+// ========================
+
 void setup() {
   Serial.begin(9600);
 
-  wheels[0].Kp = Kp_BL;
-  wheels[1].Kp = Kp_FL;
-  wheels[2].Kp = Kp_FR;
-  wheels[3].Kp = Kp_BR;
+  pinMode(PWM_FL, OUTPUT);
+  pinMode(PWM_BL, OUTPUT);
+  pinMode(PWM_FR, OUTPUT);
+  pinMode(PWM_BR, OUTPUT);
 
-  pinMode(LF_PWM, OUTPUT);
-  pinMode(LB_PWM, OUTPUT);
-  pinMode(RF_PWM, OUTPUT);
-  pinMode(RB_PWM, OUTPUT);
+  pinMode(DIR_FL, OUTPUT);
+  pinMode(DIR_BL, OUTPUT);
+  pinMode(DIR_FR, OUTPUT);
+  pinMode(DIR_BR, OUTPUT);
 
-  analogWrite(LF_PWM, 0);
-  analogWrite(LB_PWM, 0);
-  analogWrite(RF_PWM, 0);
-  analogWrite(RB_PWM, 0);
-
-  pinMode(LF_DIR, OUTPUT);
-  pinMode(LB_DIR, OUTPUT);
-  pinMode(RF_DIR, OUTPUT);
-  pinMode(RB_DIR, OUTPUT);
-
-  digitalWrite(LF_DIR, HIGH);
-  digitalWrite(LB_DIR, HIGH);
-  digitalWrite(RF_DIR, HIGH);
-  digitalWrite(RB_DIR, HIGH);
-
-  paintArm.attach(SERVO_SIG_PIN);
-  paintArm.write(SERVO_OFF_ANGLE);
-
-  pinMode(SERVO_REF_PIN, OUTPUT);
-  digitalWrite(SERVO_REF_PIN, LOW);
+  // Set forward direction
+  digitalWrite(DIR_FL, HIGH);
+  digitalWrite(DIR_BL, HIGH);
+  digitalWrite(DIR_FR, HIGH);
+  digitalWrite(DIR_BR, HIGH);
 
   stopAll();
+
+  paintArm.attach(SERVO_PIN);
+  paintArm.write(0);
 
   Serial.println("READY");
 }
 
-// ===========================================================================
+
+// ========================
 // LOOP
-// ===========================================================================
+// ========================
+
 void loop() {
 
-  updateAllWheels();
+  if (!armed) {
+    stopAll();
+  }
 
   if (Serial.available()) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
 
     if (!armed) {
-      if (line == "START") {
+      if (cmd == "START") {
         armed = true;
-        lastCommandTime = millis();
         Serial.println("ARMED");
       }
       return;
     }
 
-    if (line == "STOP") {
-      armed = false;
+    if (cmd == "STOP") {
       stopAll();
+      armed = false;
       Serial.println("DISARMED");
       return;
     }
 
-    parseAndApply(line);
+    parseAndApply(cmd);
   }
 
-  if (armed && !motorsStopped &&
-      (millis() - lastCommandTime > TIMEOUT_MS)) {
+  if (armed && (millis() - lastCommandTime > TIMEOUT_MS)) {
     stopAll();
-    Serial.println("WATCHDOG");
+    Serial.println("WATCHDOG STOP");
   }
 
-  // ===== NEW ENCODER OUTPUT =====
-  if (millis() - lastEncSend > ENC_INTERVAL_MS) {
-    sendEncoderData();
-    lastEncSend = millis();
-  }
+  analogWrite(PWM_FL, pwm_FL);
+  analogWrite(PWM_BL, pwm_BL);
+  analogWrite(PWM_FR, pwm_FR);
+  analogWrite(PWM_BR, pwm_BR);
 }
 
-// ===========================================================================
-// ENCODER OUTPUT
-// ===========================================================================
-void sendEncoderData() {
-  Serial.print("ENC:");
 
-  Serial.print("BL:");
-  Serial.print(wheels[0].passCount);
-  Serial.print(",RPM:");
-  Serial.print(wheels[0].rpm, 1);
-
-  Serial.print(",FL:");
-  Serial.print(wheels[1].passCount);
-  Serial.print(",RPM:");
-  Serial.print(wheels[1].rpm, 1);
-
-  Serial.print(",FR:");
-  Serial.print(wheels[2].passCount);
-  Serial.print(",RPM:");
-  Serial.print(wheels[2].rpm, 1);
-
-  Serial.print(",BR:");
-  Serial.print(wheels[3].passCount);
-  Serial.print(",RPM:");
-  Serial.print(wheels[3].rpm, 1);
-
-  Serial.println();
-}
-
-// ===========================================================================
-// CONTROL LOOP
-// ===========================================================================
-void updateAllWheels() {
-  if (!armed || motorsStopped) return;
-
-  for (int i = 0; i < 4; i++) {
-    WheelState &w = wheels[i];
-
-    int val = analogRead(w.hallPin);
-    bool detected = (val >= HALL_LOW && val <= HALL_HIGH);
-
-    if (w.firstLoop) {
-      w.magnetPresent = detected;
-      w.lastPassTime = millis();
-      w.firstLoop = false;
-      continue;
-    }
-
-    if (detected && !w.magnetPresent) {
-      unsigned long now = millis();
-      unsigned long dt = now - w.lastPassTime;
-      w.lastPassTime = now;
-
-      if (dt > 0) {
-        w.rpm = (60000.0f / NUM_MAGNETS) / dt;
-      }
-
-      w.passCount++;
-      w.magnetPresent = true;
-    }
-
-    if (!detected && w.magnetPresent) {
-      w.magnetPresent = false;
-    }
-
-    if (millis() - w.lastPassTime > 1000) {
-      w.rpm = 0;
-    }
-
-    if (w.targetRPM < 1) {
-      w.pwm = 0;
-    } else {
-      float error = w.targetRPM - w.rpm;
-      w.pwm += int(w.Kp * error);
-      w.pwm = constrain(w.pwm, PWM_MIN, 255);
-    }
-
-    analogWrite(w.pwmPin, w.pwm);
-  }
-}
-
-// ===========================================================================
-// COMMAND PARSER
-// ===========================================================================
-float pwmToTargetRPM(int v) {
-  return (float(v) / 255.0f) * MAX_TARGET_RPM;
-}
+// ========================
+// PARSER
+// ========================
 
 void parseAndApply(String cmd) {
-  int l1 = extractValue(cmd, "L1:");
-  int l2 = extractValue(cmd, "L2:");
-  int r1 = extractValue(cmd, "R1:");
-  int r2 = extractValue(cmd, "R2:");
-  int arm = extractValue(cmd, "ARM:");
 
-  if (l1 < 0 || l2 < 0 || r1 < 0 || r2 < 0) return;
+  int l1 = 0, l2 = 0, r1 = 0, r2 = 0, arm = 0;
 
-  wheels[0].targetRPM = pwmToTargetRPM(l2);
-  wheels[1].targetRPM = pwmToTargetRPM(l1);
-  wheels[2].targetRPM = pwmToTargetRPM(r1);
-  wheels[3].targetRPM = pwmToTargetRPM(r2);
+  sscanf(cmd.c_str(), "L1:%d,L2:%d,R1:%d,R2:%d,ARM:%d",
+         &l1, &l2, &r1, &r2, &arm);
+
+  l1 = constrain(l1, 0, 255);
+  l2 = constrain(l2, 0, 255);
+  r1 = constrain(r1, 0, 255);
+  r2 = constrain(r2, 0, 255);
+
+  // CORRECT MAPPING
+  pwm_FL = l1;
+  pwm_BL = l2;
+  pwm_FR = r1;
+  pwm_BR = r2;
+
+  paintArm.write(arm ? 90 : 0);
 
   lastCommandTime = millis();
-  motorsStopped = false;
+
+  Serial.print("PWM → ");
+  Serial.print("FL:"); Serial.print(l1);
+  Serial.print(" BL:"); Serial.print(l2);
+  Serial.print(" FR:"); Serial.print(r1);
+  Serial.print(" BR:"); Serial.println(r2);
 }
 
-// ===========================================================================
-// HELPERS
-// ===========================================================================
-int extractValue(String cmd, String key) {
-  int i = cmd.indexOf(key);
-  if (i < 0) return -1;
-  int start = i + key.length();
-  int end = cmd.indexOf(',', start);
-  String val = (end < 0) ? cmd.substring(start) : cmd.substring(start, end);
-  return val.toInt();
-}
+
+// ========================
+// STOP
+// ========================
 
 void stopAll() {
-  for (int i = 0; i < 4; i++) {
-    wheels[i].targetRPM = 0;
-    wheels[i].pwm = 0;
-    analogWrite(wheels[i].pwmPin, 0);
-  }
-  motorsStopped = true;
+  pwm_FL = 0;
+  pwm_BL = 0;
+  pwm_FR = 0;
+  pwm_BR = 0;
+
+  analogWrite(PWM_FL, 0);
+  analogWrite(PWM_BL, 0);
+  analogWrite(PWM_FR, 0);
+  analogWrite(PWM_BR, 0);
 }
