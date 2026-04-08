@@ -1,60 +1,42 @@
 """
-path_following.py  (v4 — encoder/time toggle)
+path_following.py  (v5 — single speed, GPS stop, timed turn)
 
-Top-level switches
-------------------
-  USE_ENCODERS   False → no encoder data used anywhere. Both wheels get
-                         BASE_SPEED during straights (no PID drift correction).
-                         Turn runs for TURN_DURATION_SEC seconds then stops.
-                 True  → encoder ticks used for straight PID correction AND
-                         turn completion (counts to TICKS_PER_90).
+All four wheels receive the same speed setpoint at all times during
+straight segments. There is no differential, no drift correction, and
+no encoder dependency. GPS distance is the only stop trigger.
+The 90° right point turn is purely time-based.
 
-  These are the only two lines you need to change to switch modes:
-
-      USE_ENCODERS   = False   # ← toggle here
-      TURN_MODE      = "time"  # ← "time" or "ticks"
-
-  TURN_MODE is ignored when USE_ENCODERS = False (always uses time).
-  TURN_MODE = "ticks" requires USE_ENCODERS = True.
+When encoders or an IMU are available and confirmed working, drift
+correction can be added back on top of this foundation.
 
 State machine
 -------------
   STRAIGHT_1  →  TURNING  →  STRAIGHT_2  →  DONE
 
-  STRAIGHT : both wheels at BASE_SPEED. PID correction only active when
-             USE_ENCODERS = True and drift exceeds DRIFT_DEADBAND.
-  TURNING  : left forward, right reverse at TURN_SPEED_MS.
-             Ends after TURN_DURATION_SEC (time mode) or TICKS_PER_90
-             left-wheel ticks (tick mode).
-  DONE     : motors stop, paint arm off.
+Tuning — the only three numbers you need to calibrate
+------------------------------------------------------
+  BASE_SPEED        m/s sent to all four wheels during straights.
+                    Start low (~0.15), raise once GPS stop is working.
 
-Encoder serial protocol  (Arduino → Pi)
-----------------------------------------
-  "ENC:<left_cumulative>,<right_cumulative>\\n"
-  Ignored entirely when USE_ENCODERS = False.
+  TURN_SPEED_MS     m/s magnitude during point turn.
+                    Start low (~0.10). Consistent speed = consistent turn.
+
+  TURN_DURATION_SEC Seconds for a 90° right point turn at TURN_SPEED_MS.
+                    Calibrate: run a turn, time it with a stopwatch,
+                    adjust until visually 90°. Repeat 3x and average.
+                    *** If you change TURN_SPEED_MS, recalibrate this. ***
 
 Motor command format  (Pi → Arduino)
 --------------------------------------
   "L1:<v>,L2:<v>,R1:<v>,R2:<v>,ARM:<v>\\n"
-  Values 0–255 are speed setpoints. Arduino closes velocity loop per wheel.
-  Negative v_R_ms during turn signals Arduino to reverse the right side.
+  Values 0–255. Arduino closes per-wheel velocity loop.
+  During a straight: L1=L2=R1=R2 always.
+  During a turn:     L1=L2 forward, R1=R2 reverse (right side).
 """
 
 import math
 import time
 import serial
-
-
-# ===========================================================================
-# TOP-LEVEL SWITCHES  ← change these two lines to switch modes
-# ===========================================================================
-USE_ENCODERS = False   # True  = use encoder ticks for PID + turn counting
-                       # False = no encoders, time-based turn, no PID
-
-TURN_MODE    = "time"  # "time"  = turn for TURN_DURATION_SEC seconds
-                       # "ticks" = turn until TICKS_PER_90 ticks (requires
-                       #           USE_ENCODERS = True)
-# ===========================================================================
 
 
 # ---------------------------------------------------------------------------
@@ -68,23 +50,46 @@ def open_serial():
     return serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
 
 
-def send_motor_commands(ser, v_L_ms: float, v_R_ms: float, arm: bool):
+def send_motor_commands(ser, pwm_all: int, arm: bool):
     """
-    Send speed setpoints to Arduino.
-    Positive values → forward. Negative v_R_ms → right side reverses.
-    Format: "L1:<v>,L2:<v>,R1:<v>,R2:<v>,ARM:<v>\\n"  (values 0–255)
+    Send the same speed setpoint to all four wheels.
+    Used during straight segments — no differential at all.
+
+    Parameters
+    ----------
+    pwm_all : int   Single speed setpoint [0, 255] for all wheels.
+    arm     : bool  True = paint arm active.
     """
-    pwm_L   = speed_to_pwm(v_L_ms)
-    pwm_R   = speed_to_pwm(v_R_ms)
+    pwm_all = int(max(0, min(255, pwm_all)))
     arm_val = 1 if arm else 0
-    cmd = f"L1:{pwm_L},L2:{pwm_L},R1:{pwm_R},R2:{pwm_R},ARM:{arm_val}\n"
+    cmd = f"L1:{pwm_all},L2:{pwm_all},R1:{pwm_all},R2:{pwm_all},ARM:{arm_val}\n"
+    ser.write(cmd.encode())
+
+
+def send_turn_command(ser, pwm_left: int, pwm_right: int, arm: bool):
+    """
+    Send differential speed for point turn.
+    Left side forward, right side reverse (handled by Arduino direction pins).
+    The Arduino must interpret a negative R value as reverse — update
+    Arduino code if it only accepts 0–255 unsigned.
+
+    Parameters
+    ----------
+    pwm_left  : int  Left side setpoint  [0, 255] (forward).
+    pwm_right : int  Right side setpoint [0, 255] (reverse, sign handled by Arduino).
+    arm       : bool Paint arm (off during turn).
+    """
+    pwm_left  = int(max(0, min(255, pwm_left)))
+    pwm_right = int(max(0, min(255, pwm_right)))
+    arm_val   = 1 if arm else 0
+    cmd = f"L1:{pwm_left},L2:{pwm_left},R1:-{pwm_right},R2:-{pwm_right},ARM:{arm_val}\n"
     ser.write(cmd.encode())
 
 
 # ---------------------------------------------------------------------------
-# Speed <-> PWM
+# Speed -> PWM
 # ---------------------------------------------------------------------------
-MAX_SPEED_MS = 1.5
+MAX_SPEED_MS = 1.5   # m/s that maps to setpoint 255
 
 
 def speed_to_pwm(speed_ms: float) -> int:
@@ -93,38 +98,12 @@ def speed_to_pwm(speed_ms: float) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Tuning constants
+# Tuning constants  ← the only numbers to adjust
 # ---------------------------------------------------------------------------
-
-# --- Straight driving ---
-BASE_SPEED        = 0.20   # m/s, both wheels during straight
-
-# PID — only active when USE_ENCODERS = True
-# Set any gain to 0.0 to disable that term individually
-KP_ENC            = 0.003
-KI_ENC            = 0.0    # disabled — set > 0 to enable
-KD_ENC            = 0.0    # disabled — set > 0 to enable
-MAX_CORRECTION_MS = 0.10   # clamp on total PID correction (m/s)
-DRIFT_DEADBAND    = 2      # ticks — ignore drift smaller than this
-
-STOP_MARGIN_M     = 0.30   # halt this many metres before GPS target
-
-# --- Point turn ---
-TURN_SPEED_MS     = 0.10   # m/s magnitude for each side during point turn
-
-# Time-based turn (used when TURN_MODE = "time" or USE_ENCODERS = False)
+BASE_SPEED        = 0.15   # m/s — all four wheels during straight segments
+TURN_SPEED_MS     = 0.10   # m/s — each side during point turn
 TURN_DURATION_SEC = 3.0    # *** CALIBRATE *** seconds for a 90° right turn
-                           # Method: run a turn with stopwatch, adjust until
-                           # visually 90°. Repeat 3x and average.
-
-# Tick-based turn (used when TURN_MODE = "ticks" AND USE_ENCODERS = True)
-TICKS_PER_90      = 2000   # *** CALIBRATE *** left-wheel ticks for 90° right
-                           # Method: run a turn, read left tick count at 90°.
-                           # Repeat 3x and average.
-
-# --- GPS heading blend ---
-GPS_HEADING_BLEND = 0.0    # 0 = no GPS heading blend (safest). 0.1–0.2 = light blend.
-MIN_GPS_MOVE_M    = 0.25   # min GPS displacement (m) before updating heading
+STOP_MARGIN_M     = 0.30   # stop this many metres before GPS target
 
 
 # ---------------------------------------------------------------------------
@@ -141,20 +120,16 @@ STATE_DONE       = "DONE"
 # ---------------------------------------------------------------------------
 
 def dist_m(a: tuple, b: tuple) -> float:
+    """Straight-line distance between two (easting, northing) points."""
     return math.sqrt((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2)
 
 
 def heading_from_points(p1: tuple, p2: tuple) -> float:
+    """Bearing in radians (CCW from East) from p1 to p2."""
     dx, dy = p2[0] - p1[0], p2[1] - p1[1]
     if abs(dx) < 1e-9 and abs(dy) < 1e-9:
         return 0.0
     return math.atan2(dy, dx)
-
-
-def normalize_angle(a: float) -> float:
-    while a >  math.pi: a -= 2 * math.pi
-    while a < -math.pi: a += 2 * math.pi
-    return a
 
 
 def heading_to_compass(rad: float) -> float:
@@ -163,67 +138,31 @@ def heading_to_compass(rad: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Encoder helpers
-# ---------------------------------------------------------------------------
-
-def parse_encoder_line(line: str):
-    line = line.strip()
-    if not line.startswith("ENC:"):
-        return None
-    try:
-        parts = line[4:].split(",")
-        return int(parts[0]), int(parts[1])
-    except (IndexError, ValueError):
-        return None
-
-
-def read_encoders(ser) -> tuple | None:
-    """
-    Drain Arduino serial buffer, return last valid ENC:<L>,<R> as (L, R).
-    Returns None if no encoder line was waiting.
-    Always returns None immediately when USE_ENCODERS = False.
-    """
-    if not USE_ENCODERS:
-        # Still drain the buffer so it doesn't back up, just discard
-        while ser.in_waiting:
-            try:
-                ser.readline()
-            except serial.SerialException:
-                break
-        return None
-
-    result = None
-    while ser.in_waiting:
-        try:
-            raw = ser.readline().decode("ascii", errors="replace")
-        except serial.SerialException:
-            break
-        parsed = parse_encoder_line(raw)
-        if parsed is not None:
-            result = parsed
-    return result
-
-
-# ---------------------------------------------------------------------------
-# PathFollower  (v4)
+# PathFollower  (v5)
 # ---------------------------------------------------------------------------
 
 class PathFollower:
     """
-    Two-segment lawnmower:  STRAIGHT_1 → TURNING (90° right) → STRAIGHT_2 → DONE
+    Two-segment lawnmower runner.
 
-    Quick-start
-    -----------
+    Usage
+    -----
     follower = PathFollower(seg1_length_m, seg2_length_m)
-    follower.set_segment_start(fix1)
-    follower.set_target_heading(fix1, fix2)
 
-    while not follower.is_finished():
-        enc = read_encoders(ser)           # None when USE_ENCODERS = False
-        ticks_L, ticks_R = enc if enc else (None, None)
-        result = follower.step(gnss.get_position(), ticks_L, ticks_R)
-        send_motor_commands(ser, result["v_L_ms"], result["v_R_ms"],
-                            result["paint_arm"])
+    # Before segment 1:
+    follower.set_segment_start(fix1)
+    follower.set_target_heading(fix1, nudge_fix2)
+
+    # Before segment 2 (after turn completes):
+    follower.set_segment_start(fix1)
+    follower.set_target_heading(fix1, nudge_fix2)
+
+    # Each cycle:
+    result = follower.step(gnss.get_position())
+    if result["state"] == STATE_TURNING:
+        send_turn_command(ser, result["pwm_turn"], result["pwm_turn"], False)
+    else:
+        send_motor_commands(ser, result["pwm_all"], result["paint_arm"])
     """
 
     def __init__(self, seg1_length_m: float, seg2_length_m: float):
@@ -232,67 +171,53 @@ class PathFollower:
 
         self._state = STATE_STRAIGHT_1
 
-        # Heading
+        # Heading (for telemetry readout only — not used for steering)
         self._ref_heading  = 0.0
         self._gps_heading  = 0.0
         self._prev_gps_pos = None
 
-        # Segment start
+        # GPS start point for current segment
         self._seg_start = None
 
-        # Encoder state
-        self._prev_L  = None
-        self._prev_R  = None
-        self._delta_L = 0
-        self._delta_R = 0
+        # Turn timer
+        self._turn_start_time = None
 
-        # PID state
-        self._integral   = 0.0
-        self._prev_drift = 0.0
-        self._integral_clamp = 5.0
+        # Precompute PWM values once
+        self._pwm_base = speed_to_pwm(BASE_SPEED)
+        self._pwm_turn = speed_to_pwm(TURN_SPEED_MS)
 
-        # Turn state
-        self._turn_start_time = None   # for time-based turn
-        self._turn_start_L    = None   # for tick-based turn
-
-        # Resolve effective turn mode at init so it's clear in logs
-        if not USE_ENCODERS and TURN_MODE == "ticks":
-            print("[PathFollower] WARNING: TURN_MODE='ticks' requires "
-                  "USE_ENCODERS=True. Falling back to time-based turn.")
-        self._effective_turn_mode = (
-            "ticks" if (USE_ENCODERS and TURN_MODE == "ticks") else "time"
-        )
-
-        print(f"[PathFollower] USE_ENCODERS = {USE_ENCODERS}")
-        print(f"[PathFollower] Turn mode    = {self._effective_turn_mode}"
-              + (f"  ({TURN_DURATION_SEC}s)"
-                 if self._effective_turn_mode == "time"
-                 else f"  ({TICKS_PER_90} ticks)"))
-        print(f"[PathFollower] Segment 1    = {seg1_length_m:.2f} m")
-        print(f"[PathFollower] Segment 2    = {seg2_length_m:.2f} m")
+        print(f"[PathFollower] Segment 1    : {seg1_length_m:.2f} m")
+        print(f"[PathFollower] Segment 2    : {seg2_length_m:.2f} m")
+        print(f"[PathFollower] Base PWM     : {self._pwm_base}  "
+              f"({BASE_SPEED} m/s)")
+        print(f"[PathFollower] Turn PWM     : {self._pwm_turn}  "
+              f"({TURN_SPEED_MS} m/s)")
+        print(f"[PathFollower] Turn duration: {TURN_DURATION_SEC} s")
+        print(f"[PathFollower] Stop margin  : {STOP_MARGIN_M} m")
 
     # ------------------------------------------------------------------
-    # Public setup
+    # Setup — call before each segment
     # ------------------------------------------------------------------
 
     def set_segment_start(self, pos: tuple):
         """Record GPS start point for the current segment."""
         self._seg_start    = pos
         self._prev_gps_pos = pos
-        print(f"[PathFollower] Segment start: E={pos[0]:.3f}  N={pos[1]:.3f}")
+        print(f"[PathFollower] Segment start: "
+              f"E={pos[0]:.3f}  N={pos[1]:.3f}")
 
     def set_target_heading(self, fix1: tuple, fix2: tuple):
-        """Lock reference heading from two nudge fixes."""
+        """
+        Lock reference heading from two nudge fixes.
+        Used for telemetry display only — does not affect motor commands.
+        """
         d = dist_m(fix1, fix2)
         if d < 0.10:
-            print(f"[PathFollower] WARNING: nudge too close ({d:.3f} m) — "
-                  "keeping previous heading.")
+            print(f"[PathFollower] WARNING: nudge too close ({d:.3f} m).")
             return
         self._ref_heading = heading_from_points(fix1, fix2)
         self._gps_heading = self._ref_heading
-        self._integral    = 0.0
-        self._prev_drift  = 0.0
-        print(f"[PathFollower] Heading locked: "
+        print(f"[PathFollower] Heading reference: "
               f"{math.degrees(self._ref_heading):.1f}° from East  "
               f"({heading_to_compass(self._ref_heading):.1f}° compass)")
 
@@ -303,242 +228,154 @@ class PathFollower:
         return self._state
 
     # ------------------------------------------------------------------
-    # Internal: encoders
-    # ------------------------------------------------------------------
-
-    def _update_encoders(self, ticks_L: int, ticks_R: int):
-        if self._prev_L is None:
-            self._prev_L  = ticks_L
-            self._prev_R  = ticks_R
-            self._delta_L = 0
-            self._delta_R = 0
-            return
-        self._delta_L = ticks_L - self._prev_L
-        self._delta_R = ticks_R - self._prev_R
-        self._prev_L  = ticks_L
-        self._prev_R  = ticks_R
-
-    # ------------------------------------------------------------------
-    # Internal: GPS heading blend
+    # GPS heading (telemetry only)
     # ------------------------------------------------------------------
 
     def _update_gps_heading(self, pos: tuple):
-        if GPS_HEADING_BLEND == 0.0 or self._prev_gps_pos is None:
+        """Update displayed GPS heading when rover has moved enough."""
+        if self._prev_gps_pos is None:
             return
         d = dist_m(self._prev_gps_pos, pos)
-        if d < MIN_GPS_MOVE_M:
+        if d < 0.25:
             return
-        new_hdg = heading_from_points(self._prev_gps_pos, pos)
-        self._gps_heading = normalize_angle(
-            (1.0 - GPS_HEADING_BLEND) * self._gps_heading
-            + GPS_HEADING_BLEND * new_hdg
-        )
+        self._gps_heading  = heading_from_points(self._prev_gps_pos, pos)
         self._prev_gps_pos = pos
 
     # ------------------------------------------------------------------
-    # Internal: PID correction (straight)
+    # Straight segment step
     # ------------------------------------------------------------------
 
-    def _pid_correction(self) -> float:
-        """
-        Returns m/s correction from encoder drift.
-        Always returns 0.0 when USE_ENCODERS = False.
-        Positive = left ran more = slow left / speed right.
-        """
-        if not USE_ENCODERS:
-            return 0.0
-
-        drift = float(self._delta_L - self._delta_R)
-
-        if abs(drift) <= DRIFT_DEADBAND:
-            self._integral   *= 0.95   # decay integrator in dead-band
-            self._prev_drift  = drift
-            return 0.0
-
-        p_term = KP_ENC * drift
-
-        self._integral += drift
-        self._integral  = max(-self._integral_clamp,
-                               min(self._integral_clamp, self._integral))
-        i_term = KI_ENC * self._integral
-
-        d_term = KD_ENC * (drift - self._prev_drift)
-        self._prev_drift = drift
-
-        correction = p_term + i_term + d_term
-        return max(-MAX_CORRECTION_MS, min(MAX_CORRECTION_MS, correction))
-
-    # ------------------------------------------------------------------
-    # Internal: straight step (shared by seg 1 and seg 2)
-    # ------------------------------------------------------------------
-
-    def _step_straight(self, current_pos: tuple,
+    def _step_straight(self, pos: tuple,
                        seg_length: float,
                        next_state: str) -> dict:
 
-        self._update_gps_heading(current_pos)
+        self._update_gps_heading(pos)
 
-        gps_dist  = dist_m(self._seg_start, current_pos)
+        gps_dist  = dist_m(self._seg_start, pos)
         remaining = seg_length - gps_dist
 
         # Transition check
         if gps_dist >= (seg_length - STOP_MARGIN_M):
             print(f"\n[PathFollower] {self._state} complete — "
-                  f"GPS dist={gps_dist:.2f} m  target={seg_length:.2f} m")
+                  f"{gps_dist:.2f} m travelled, target {seg_length:.2f} m")
             self._state = next_state
 
             if next_state == STATE_TURNING:
                 self._turn_start_time = time.time()
-                self._turn_start_L    = self._prev_L
-                print(f"[PathFollower] Starting 90° right point turn "
-                      f"({self._effective_turn_mode} mode) ...")
-
+                print(f"[PathFollower] Starting {TURN_DURATION_SEC}s "
+                      f"right point turn ...")
             elif next_state == STATE_DONE:
                 print("[PathFollower] All segments complete. DONE.")
 
-            return self._stopped_dict(current_pos)
+            # Stop motors on transition
+            return self._make_dict(pos, gps_dist, remaining,
+                                   pwm_all=0, pwm_turn=0,
+                                   paint=False, turn_pct=0.0)
 
-        # PID correction (0.0 when USE_ENCODERS = False)
-        correction = self._pid_correction()
-        v_L_ms = max(0.0, BASE_SPEED - correction)
-        v_R_ms = max(0.0, BASE_SPEED + correction)
-
-        heading_err = normalize_angle(self._gps_heading - self._ref_heading)
-
-        return {
-            "v_L_ms"          : round(v_L_ms, 4),
-            "v_R_ms"          : round(v_R_ms, 4),
-            "paint_arm"       : True,
-            "status"          : "running",
-            "state"           : self._state,
-            "easting"         : round(current_pos[0], 3),
-            "northing"        : round(current_pos[1], 3),
-            "dist_from_start" : round(gps_dist, 3),
-            "dist_remaining"  : round(remaining, 3),
-            "heading_deg"     : round(heading_to_compass(self._gps_heading), 1),
-            "heading_ref_deg" : round(heading_to_compass(self._ref_heading), 1),
-            "heading_err_deg" : round(math.degrees(heading_err), 2),
-            "enc_drift"       : float(self._delta_L - self._delta_R)
-                                if USE_ENCODERS else 0.0,
-            "correction_ms"   : round(correction, 4),
-            "turn_progress_pct": 0.0,
-        }
+        return self._make_dict(pos, gps_dist, remaining,
+                               pwm_all=self._pwm_base, pwm_turn=0,
+                               paint=True, turn_pct=0.0)
 
     # ------------------------------------------------------------------
-    # Internal: turn step
+    # Turn step
     # ------------------------------------------------------------------
 
     def _step_turning(self) -> dict:
-        """
-        Right point turn: left wheel forward, right wheel reverse.
-        Completion determined by time or ticks depending on _effective_turn_mode.
-        """
-        done     = False
-        progress = 0.0
+        elapsed  = time.time() - self._turn_start_time
+        progress = min(1.0, elapsed / TURN_DURATION_SEC)
 
-        if self._effective_turn_mode == "time":
-            elapsed  = time.time() - self._turn_start_time
-            progress = min(1.0, elapsed / TURN_DURATION_SEC)
-            done     = elapsed >= TURN_DURATION_SEC
-
-        else:  # ticks
-            if self._prev_L is None or self._turn_start_L is None:
-                print("[PathFollower] WARNING: no encoder data for tick turn.")
-                return self._turn_status_dict(0.0, 0.0, progress=0.0)
-            ticks_so_far = abs(self._prev_L - self._turn_start_L)
-            progress     = min(1.0, ticks_so_far / TICKS_PER_90)
-            done         = ticks_so_far >= TICKS_PER_90
-
-        if done:
+        if elapsed >= TURN_DURATION_SEC:
             print(f"[PathFollower] Turn complete.")
-            self._state      = STATE_STRAIGHT_2
-            self._integral   = 0.0
-            self._prev_drift = 0.0
-            self._delta_L    = 0
-            self._delta_R    = 0
-            return self._turn_status_dict(0.0, 0.0, progress=1.0)
+            self._state = STATE_STRAIGHT_2
+            return self._make_dict(None, 0, 0,
+                                   pwm_all=0, pwm_turn=0,
+                                   paint=False, turn_pct=100.0)
 
-        # Still turning: left forward, right reverse
-        return self._turn_status_dict(TURN_SPEED_MS, TURN_SPEED_MS,
-                                      progress=progress)
-
-    def _turn_status_dict(self, v_left: float, v_right: float,
-                          progress: float) -> dict:
-        return {
-            "v_L_ms"           : v_left,
-            "v_R_ms"           : -v_right,   # negative = Arduino reverses right
-            "paint_arm"        : False,
-            "status"           : "running",
-            "state"            : self._state,
-            "easting"          : 0.0,
-            "northing"         : 0.0,
-            "dist_from_start"  : 0.0,
-            "dist_remaining"   : 0.0,
-            "heading_deg"      : 0.0,
-            "heading_ref_deg"  : 0.0,
-            "heading_err_deg"  : 0.0,
-            "enc_drift"        : 0.0,
-            "correction_ms"    : 0.0,
-            "turn_progress_pct": round(progress * 100, 1),
-        }
+        return self._make_dict(None, 0, 0,
+                               pwm_all=0, pwm_turn=self._pwm_turn,
+                               paint=False, turn_pct=round(progress * 100, 1))
 
     # ------------------------------------------------------------------
     # Main step
     # ------------------------------------------------------------------
 
-    def step(self, current_pos: tuple,
-             ticks_L=None,
-             ticks_R=None) -> dict:
+    def step(self, current_pos: tuple) -> dict:
         """
         Run one control cycle.
 
         Parameters
         ----------
-        current_pos : (easting, northing)
-        ticks_L     : cumulative left  encoder ticks, or None
-        ticks_R     : cumulative right encoder ticks, or None
-                      Both ignored when USE_ENCODERS = False.
+        current_pos : (easting, northing) from gnss.get_position()
+
+        Returns
+        -------
+        dict with keys:
+            state           current state string
+            pwm_all         PWM for all four wheels (straight only, else 0)
+            pwm_turn        PWM magnitude for turn (turn only, else 0)
+            paint_arm       bool
+            status          "running" | "finished" | "transitioning"
+            easting         float (0.0 during turn)
+            northing        float (0.0 during turn)
+            dist_from_start GPS distance from segment start (m)
+            dist_remaining  metres left in current segment
+            heading_deg     measured GPS heading (compass degrees)
+            heading_ref_deg reference heading from nudge (compass degrees)
+            turn_progress_pct 0–100 during turn, else 0.0
+
+        Motor commands in main.py
+        -------------------------
+            if result["state"] == STATE_TURNING:
+                send_turn_command(ser, result["pwm_turn"],
+                                       result["pwm_turn"], False)
+            else:
+                send_motor_commands(ser, result["pwm_all"],
+                                         result["paint_arm"])
         """
         if self._state == STATE_DONE:
-            return self._stopped_dict(current_pos)
-
-        if USE_ENCODERS and ticks_L is not None and ticks_R is not None:
-            self._update_encoders(ticks_L, ticks_R)
+            return self._make_dict(current_pos, 0, 0,
+                                   pwm_all=0, pwm_turn=0,
+                                   paint=False, turn_pct=0.0)
 
         if self._state == STATE_STRAIGHT_1:
-            return self._step_straight(current_pos,
-                                       self.seg1_length,
-                                       next_state=STATE_TURNING)
+            return self._step_straight(current_pos, self.seg1_length,
+                                       STATE_TURNING)
+
         if self._state == STATE_TURNING:
             return self._step_turning()
 
         if self._state == STATE_STRAIGHT_2:
-            return self._step_straight(current_pos,
-                                       self.seg2_length,
-                                       next_state=STATE_DONE)
+            return self._step_straight(current_pos, self.seg2_length,
+                                       STATE_DONE)
 
-        return self._stopped_dict(current_pos)
+        return self._make_dict(current_pos, 0, 0,
+                               pwm_all=0, pwm_turn=0,
+                               paint=False, turn_pct=0.0)
 
     # ------------------------------------------------------------------
+    # Dict builder
+    # ------------------------------------------------------------------
 
-    def _stopped_dict(self, pos: tuple) -> dict:
-        status = "finished" if self._state == STATE_DONE else "transitioning"
+    def _make_dict(self, pos, dist_from_start, dist_remaining,
+                   pwm_all, pwm_turn, paint, turn_pct) -> dict:
+
+        status = ("finished"      if self._state == STATE_DONE
+                  else "transitioning" if pwm_all == 0 and pwm_turn == 0
+                  else "running")
+
         return {
-            "v_L_ms"           : 0.0,
-            "v_R_ms"           : 0.0,
-            "paint_arm"        : False,
-            "status"           : status,
             "state"            : self._state,
-            "easting"          : round(pos[0], 3),
-            "northing"         : round(pos[1], 3),
-            "dist_from_start"  : 0.0,
-            "dist_remaining"   : 0.0,
+            "pwm_all"          : pwm_all,
+            "pwm_turn"         : pwm_turn,
+            "paint_arm"        : paint,
+            "status"           : status,
+            "easting"          : round(pos[0], 3) if pos else 0.0,
+            "northing"         : round(pos[1], 3) if pos else 0.0,
+            "dist_from_start"  : round(dist_from_start, 3),
+            "dist_remaining"   : round(dist_remaining, 3),
             "heading_deg"      : round(heading_to_compass(self._gps_heading), 1),
             "heading_ref_deg"  : round(heading_to_compass(self._ref_heading), 1),
-            "heading_err_deg"  : 0.0,
-            "enc_drift"        : 0.0,
-            "correction_ms"    : 0.0,
-            "turn_progress_pct": 0.0,
+            "turn_progress_pct": turn_pct,
         }
 
 
@@ -550,56 +387,46 @@ if __name__ == "__main__":
     import random
     random.seed(42)
 
-    print("PathFollower v4 smoke test")
-    print(f"USE_ENCODERS={USE_ENCODERS}  TURN_MODE={TURN_MODE}\n")
+    print("PathFollower v5 smoke test — single speed, GPS stop, timed turn\n")
 
     follower = PathFollower(seg1_length_m=10.0, seg2_length_m=8.0)
     follower.set_segment_start((500.0, 1000.0))
     follower.set_target_heading((500.0, 1000.0), (500.8, 1000.01))
 
-    e, n    = 500.0, 1000.0
-    tL = tR = 0
-    step_n  = 0
+    e, n   = 500.0, 1000.0
+    step_n = 0
     seg2_ready = False
 
     print(f"{'#':>4}  {'State':<12}  {'E':>8}  {'N':>8}  "
-          f"{'Dist':>5}  {'Rem':>5}  {'vL':>6}  {'vR':>6}  ARM  Extra")
-    print("-" * 80)
+          f"{'Dist':>5}  {'Rem':>5}  {'PWM':>4}  ARM  Extra")
+    print("-" * 72)
 
     while not follower.is_finished():
         step_n += 1
         state = follower.current_state()
 
         if state == STATE_STRAIGHT_1:
-            e  += 0.4 + random.uniform(-0.01, 0.01)
-            n  += random.uniform(-0.02, 0.02)
-            tL += 40 + random.randint(0, 2)
-            tR += 38 + random.randint(0, 2)
-
-        elif state == STATE_TURNING:
-            tL += 45
-            tR += 45
-
+            e += 0.4 + random.uniform(-0.01, 0.01)
+            n += random.uniform(-0.02, 0.02)
         elif state == STATE_STRAIGHT_2:
             if not seg2_ready:
                 follower.set_segment_start((e, n))
                 follower.set_target_heading((e, n), (e + 0.02, n + 0.8))
                 seg2_ready = True
-            n  += 0.4 + random.uniform(-0.01, 0.01)
-            e  += random.uniform(-0.02, 0.02)
-            tL += 40 + random.randint(0, 2)
-            tR += 38 + random.randint(0, 2)
+            n += 0.4 + random.uniform(-0.01, 0.01)
+            e += random.uniform(-0.02, 0.02)
 
-        r = follower.step((e, n), tL, tR)
+        r = follower.step((e, n))
 
+        pwm   = r["pwm_turn"] if state == STATE_TURNING else r["pwm_all"]
+        arm   = "ON " if r["paint_arm"] else "OFF"
         extra = (f"turn {r['turn_progress_pct']:.0f}%"
                  if state == STATE_TURNING else "")
-        arm   = "ON " if r["paint_arm"] else "OFF"
 
         print(f"{step_n:>4}  {r['state']:<12}  "
               f"{r['easting']:>8.3f}  {r['northing']:>8.3f}  "
               f"{r['dist_from_start']:>5.2f}  {r['dist_remaining']:>5.2f}  "
-              f"{r['v_L_ms']:>6.3f}  {r['v_R_ms']:>6.3f}  {arm}  {extra}")
+              f"{pwm:>4}  {arm}  {extra}")
 
         if step_n > 300:
             print("(step limit)")
