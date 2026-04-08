@@ -1,26 +1,26 @@
 """
-main.py  (v3 — state machine: STRAIGHT_1 → TURNING → STRAIGHT_2 → DONE)
+main.py  (v5 — single speed, GPS stop, timed turn)
 
 Startup sequence
 ----------------
 1.  Open Arduino serial, wait for READY / send START.
 2.  Start GNSSReader background thread, wait for first fix.
-3.  Operator inputs segment 1 length and segment 2 length.
-4.  Nudge fix for segment 1 → locks heading.
-5.  Run segment 1 (straight, paint ON).
-6.  Point turn (90° right, paint OFF). Rover waits after turn.
-7.  Nudge fix for segment 2 → locks new heading.
-8.  Run segment 2 (straight, paint ON).
+3.  Operator inputs segment 1 and segment 2 lengths.
+4.  Nudge fix → locks display heading for segment 1.
+5.  Run segment 1: all four wheels at BASE_SPEED, GPS stop trigger.
+6.  Point turn: left forward, right reverse for TURN_DURATION_SEC.
+7.  Nudge fix → locks display heading for segment 2.
+8.  Run segment 2: all four wheels at BASE_SPEED, GPS stop trigger.
 9.  Stop, disarm Arduino.
 """
 
-import math
 import time
 import sys
 
 from gnss_reader    import GNSSReader
-from path_following import (PathFollower, open_serial, send_motor_commands,
-                             read_encoders, dist_m,
+from path_following import (PathFollower, open_serial,
+                             send_motor_commands, send_turn_command,
+                             dist_m,
                              STATE_STRAIGHT_1, STATE_TURNING,
                              STATE_STRAIGHT_2, STATE_DONE)
 
@@ -33,7 +33,7 @@ LOOP_DT           = 1.0 / LOOP_HZ
 GNSS_PORT         = "COM9"
 GNSS_BAUD         = 57600
 ARDUINO_BOOT_WAIT = 2.0
-NUDGE_SAMPLES     = 3      # GPS fixes averaged per nudge point
+NUDGE_SAMPLES     = 3
 
 
 # ---------------------------------------------------------------------------
@@ -86,34 +86,54 @@ def ask_length(prompt: str) -> float:
             print("  Enter a number.")
 
 
+def do_nudge(gnss: GNSSReader, label: str) -> tuple:
+    """
+    Walk operator through recording two fixes for a heading nudge.
+    Returns (fix1, fix2).
+    """
+    print(f"\n[Main] {label} — stand rover at start, hold still.")
+    input("  Press ENTER to record fix_1 ...\n")
+    fix1 = averaged_fix(gnss)
+    print(f"  fix_1: E={fix1[0]:.3f}  N={fix1[1]:.3f}")
+
+    print("\n  Nudge rover ~1 m forward along desired direction, then stop.")
+    input("  Press ENTER to record fix_2 ...\n")
+    fix2 = averaged_fix(gnss)
+    print(f"  fix_2: E={fix2[0]:.3f}  N={fix2[1]:.3f}")
+
+    d = dist_m(fix1, fix2)
+    if d < 0.3:
+        print(f"  WARNING: nudge only {d:.2f} m — heading reference may be "
+              f"unreliable. Consider nudging further.")
+        input("  Press ENTER to continue or Ctrl+C to abort ...\n")
+
+    return fix1, fix2
+
+
 def print_header():
     print(f"\n  {'State':<12}  {'E':>9}  {'N':>9}  "
           f"{'Dist':>5}  {'Rem':>5}  "
-          f"{'HdgGPS':>7}  {'HErr':>6}  "
-          f"{'Drift':>6}  {'Corr':>7}  "
-          f"{'vL':>6}  {'vR':>6}  ARM")
-    print("  " + "-" * 90)
+          f"{'HdgGPS':>7}  {'HdgRef':>7}  "
+          f"{'PWM':>4}  ARM  Note")
+    print("  " + "-" * 80)
 
 
 def print_telemetry(result: dict):
-    arm_str  = "ON " if result["paint_arm"] else "OFF"
-    state    = result["state"]
+    arm  = "ON " if result["paint_arm"] else "OFF"
+    state = result["state"]
 
     if state == STATE_TURNING:
-        prog = result.get("turn_progress_pct", 0.0)
-        print(f"  {state:<12}  {'':>9}  {'':>9}  "
-              f"{'':>5}  {'':>5}  "
-              f"{'':>7}  {'':>6}  "
-              f"{'':>6}  {'':>7}  "
-              f"{'':>6}  {'':>6}  {arm_str}  "
-              f"turn {prog:.0f}%")
+        note = f"turn {result['turn_progress_pct']:.0f}%"
+        pwm  = result["pwm_turn"]
     else:
-        print(f"  {state:<12}  "
-              f"{result['easting']:>9.3f}  {result['northing']:>9.3f}  "
-              f"{result['dist_from_start']:>5.2f}  {result['dist_remaining']:>5.2f}  "
-              f"{result['heading_deg']:>7.1f}  {result['heading_err_deg']:>+6.2f}  "
-              f"{result['enc_drift']:>+6.0f}  {result['correction_ms']:>+7.4f}  "
-              f"{result['v_L_ms']:>6.4f}  {result['v_R_ms']:>6.4f}  {arm_str}")
+        note = ""
+        pwm  = result["pwm_all"]
+
+    print(f"  {state:<12}  "
+          f"{result['easting']:>9.3f}  {result['northing']:>9.3f}  "
+          f"{result['dist_from_start']:>5.2f}  {result['dist_remaining']:>5.2f}  "
+          f"{result['heading_deg']:>7.1f}  {result['heading_ref_deg']:>7.1f}  "
+          f"{pwm:>4}  {arm}  {note}")
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +142,7 @@ def print_telemetry(result: dict):
 
 def main():
     print("\n" + "=" * 55)
-    print("  Rover v3 — Two-Segment Lawnmower")
+    print("  Rover v5 — Single Speed, GPS Stop, Timed Turn")
     print("=" * 55 + "\n")
 
     # ------------------------------------------------------------------
@@ -146,7 +166,7 @@ def main():
         gnss.start()
     except RuntimeError as e:
         print(f"[Main] GPS ERROR: {e}")
-        send_motor_commands(ser, 0.0, 0.0, False)
+        send_motor_commands(ser, 0, False)
         ser.close()
         sys.exit(1)
 
@@ -165,101 +185,70 @@ def main():
     follower = PathFollower(seg1_length, seg2_length)
 
     # ------------------------------------------------------------------
-    # Step 5: Nudge fix for segment 1
+    # Step 5: Segment 1 nudge
     # ------------------------------------------------------------------
-    print("\n[Main] SEGMENT 1 SETUP")
-    print("  Stand rover at the start of segment 1 and hold still.")
-    input("  Press ENTER to record fix_1 ...\n")
-    fix1 = averaged_fix(gnss)
-    print(f"  fix_1: E={fix1[0]:.3f}  N={fix1[1]:.3f}")
-
-    print("\n  Nudge rover ~1 m forward along segment 1 direction, then stop.")
-    input("  Press ENTER to record fix_2 ...\n")
-    fix2 = averaged_fix(gnss)
-    print(f"  fix_2: E={fix2[0]:.3f}  N={fix2[1]:.3f}")
-
-    nudge_dist = dist_m(fix1, fix2)
-    if nudge_dist < 0.3:
-        print(f"  WARNING: nudge only {nudge_dist:.2f} m — heading may be "
-              f"unreliable.")
-        input("  Press ENTER to continue or Ctrl+C to abort ...\n")
-
+    fix1, fix2 = do_nudge(gnss, "SEGMENT 1 HEADING")
     follower.set_segment_start(fix1)
     follower.set_target_heading(fix1, fix2)
 
     input("\n[Main] Press ENTER to start segment 1 ...\n")
 
     # ------------------------------------------------------------------
-    # Control loop — handles all states
+    # Control loop
     # ------------------------------------------------------------------
     print_header()
-    seg2_heading_set = False   # flag: nudge for seg 2 done yet?
+    seg2_ready = False
 
     try:
         while not follower.is_finished():
             loop_start = time.time()
 
-            # Encoders
-            enc     = read_encoders(ser)
-            ticks_L = enc[0] if enc else None
-            ticks_R = enc[1] if enc else None
-
-            # GPS
-            current_pos = gnss.get_position()
-
-            # ---- State-specific pre-step actions ----------------------
-
-            # When we enter STRAIGHT_2 for the first time, pause and get
-            # the nudge fix before letting the rover move.
-            if follower.current_state() == STATE_STRAIGHT_2 \
-                    and not seg2_heading_set:
-
-                print("\n[Main] Turn complete. Rover is now facing segment 2.")
-                print("  Hold rover still.")
-                input("  Press ENTER to record seg-2 fix_1 ...\n")
-                s2_fix1 = averaged_fix(gnss)
-                print(f"  fix_1: E={s2_fix1[0]:.3f}  N={s2_fix1[1]:.3f}")
-
-                print("\n  Nudge rover ~1 m forward along segment 2 direction.")
-                input("  Press ENTER to record seg-2 fix_2 ...\n")
-                s2_fix2 = averaged_fix(gnss)
-                print(f"  fix_2: E={s2_fix2[0]:.3f}  N={s2_fix2[1]:.3f}")
-
-                nudge2_dist = dist_m(s2_fix1, s2_fix2)
-                if nudge2_dist < 0.3:
-                    print(f"  WARNING: nudge only {nudge2_dist:.2f} m.")
-                    input("  Press ENTER to continue or Ctrl+C to abort ...\n")
-
-                follower.set_segment_start(s2_fix1)
-                follower.set_target_heading(s2_fix1, s2_fix2)
-                seg2_heading_set = True
-                print_header()
-                input("\n[Main] Press ENTER to start segment 2 ...\n")
-
-            # ---- Controller ------------------------------------------
-            result = follower.step(current_pos, ticks_L, ticks_R)
-
-            # ---- Motor commands --------------------------------------
-            send_motor_commands(ser,
-                                result["v_L_ms"],
-                                result["v_R_ms"],
-                                result["paint_arm"])
-
-            # ---- Arduino echo (errors, status) -----------------------
-            if ser.in_waiting:
+            # Drain any serial from Arduino (errors, status lines)
+            # No encoder reads needed
+            while ser.in_waiting:
                 echo = ser.readline().decode("ascii", errors="replace").strip()
                 if echo.startswith("ERR"):
                     print(f"  [Arduino] {echo}")
 
-            # ---- GPS quality warning ---------------------------------
+            current_pos = gnss.get_position()
+            result      = follower.step(current_pos)
+            state       = result["state"]
+
+            # ----------------------------------------------------------
+            # Pause after turn completes to collect seg 2 nudge
+            # ----------------------------------------------------------
+            if state == STATE_STRAIGHT_2 and not seg2_ready:
+                # Motors already zeroed by transition — rover is stopped
+                print("\n[Main] Turn complete. Rover facing segment 2.")
+                fix1_s2, fix2_s2 = do_nudge(gnss, "SEGMENT 2 HEADING")
+                follower.set_segment_start(fix1_s2)
+                follower.set_target_heading(fix1_s2, fix2_s2)
+                seg2_ready = True
+                print_header()
+                input("\n[Main] Press ENTER to start segment 2 ...\n")
+                continue   # re-run step() now that heading is set
+
+            # ----------------------------------------------------------
+            # Motor commands
+            # ----------------------------------------------------------
+            if state == STATE_TURNING:
+                send_turn_command(ser,
+                                  result["pwm_turn"],
+                                  result["pwm_turn"],
+                                  False)
+            else:
+                send_motor_commands(ser,
+                                    result["pwm_all"],
+                                    result["paint_arm"])
+
+            # GPS fix quality warning
             info = gnss.get_fix_info()
             if info["hdop"] > 3.0:
                 print(f"  [GPS] HDOP={info['hdop']:.1f} — fix quality poor")
 
-            # ---- Telemetry ------------------------------------------
             print_telemetry(result)
 
-            # ---- Loop rate ------------------------------------------
+            # Loop rate
             elapsed = time.time() - loop_start
             sleep_t = LOOP_DT - elapsed
             if sleep_t > 0:
@@ -270,7 +259,7 @@ def main():
 
     finally:
         print("\n[Main] Stopping motors ...")
-        send_motor_commands(ser, 0.0, 0.0, False)
+        send_motor_commands(ser, 0, False)
         ser.write(b"STOP\n")
         gnss.stop()
         ser.close()
