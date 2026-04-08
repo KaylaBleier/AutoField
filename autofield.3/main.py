@@ -1,28 +1,25 @@
 """
-main.py  (v5 — single speed, GPS stop, timed turn)
+main.py  (v5 — simple path, track log + command log)
 
-Startup sequence
-----------------
-1.  Open Arduino serial, wait for READY / send START.
-2.  Start GNSSReader background thread, wait for first fix.
-3.  Operator inputs segment 1 and segment 2 lengths.
-4.  Nudge fix → locks display heading for segment 1.
-5.  Run segment 1: all four wheels at BASE_SPEED, GPS stop trigger.
-6.  Point turn: left forward, right reverse for TURN_DURATION_SEC.
-7.  Nudge fix → locks display heading for segment 2.
-8.  Run segment 2: all four wheels at BASE_SPEED, GPS stop trigger.
-9.  Stop, disarm Arduino.
+Logs two CSV files per run into the logs/ directory:
+  track_YYYYMMDD_HHMMSS.csv   — GPS position + state every cycle
+  command_YYYYMMDD_HHMMSS.csv — every motor command sent + why
+
+Both files share the same timestamp so a run's two files are easy to match.
 """
 
-import time
+import csv
+import os
 import sys
+import time
+from datetime import datetime
 
-from gnss_reader    import GNSSReader
-from path_following import (PathFollower, open_serial,
-                             send_motor_commands, send_turn_command,
-                             dist_m,
-                             STATE_STRAIGHT_1, STATE_TURNING,
-                             STATE_STRAIGHT_2, STATE_DONE)
+from gnss_reader          import GNSSReader
+from simple_path_following import (SimplePathFollower, open_serial,
+                                   all_stop, all_forward, turn_right,
+                                   dist_m, STATE_TURN, STATE_DONE,
+                                   STATE_SEG2, PWM_BASE, PWM_TURN,
+                                   TURN_DURATION_SEC)
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +31,103 @@ GNSS_PORT         = "COM9"
 GNSS_BAUD         = 57600
 ARDUINO_BOOT_WAIT = 2.0
 NUDGE_SAMPLES     = 3
+LOG_DIR           = "logs"
+
+
+# ---------------------------------------------------------------------------
+# Loggers
+# ---------------------------------------------------------------------------
+
+class TrackLog:
+    """
+    One row per control cycle — where the rover was and what state it was in.
+
+    Columns
+    -------
+    timestamp       ISO-8601 wall clock
+    state           STRAIGHT_1 / TURNING / STRAIGHT_2 / DONE
+    easting         UTM easting (m)
+    northing        UTM northing (m)
+    dist_from_start GPS distance from current segment start (m)
+    dist_remaining  metres left in current segment
+    turn_pct        0–100 during turn, else 0
+    hdop            GPS fix quality (lower = better)
+    """
+
+    COLUMNS = ["timestamp", "state", "easting", "northing",
+               "dist_from_start", "dist_remaining", "turn_pct", "hdop"]
+
+    def __init__(self, stamp: str):
+        os.makedirs(LOG_DIR, exist_ok=True)
+        self.path = os.path.join(LOG_DIR, f"track_{stamp}.csv")
+        self._f   = open(self.path, "w", newline="")
+        self._w   = csv.DictWriter(self._f, fieldnames=self.COLUMNS)
+        self._w.writeheader()
+        print(f"[TrackLog]   {self.path}")
+
+    def log(self, result: dict, hdop: float):
+        self._w.writerow({
+            "timestamp"      : datetime.now().isoformat(timespec="milliseconds"),
+            "state"          : result["state"],
+            "easting"        : result["easting"],
+            "northing"       : result["northing"],
+            "dist_from_start": result["dist"],
+            "dist_remaining" : result["remaining"],
+            "turn_pct"       : result["turn_pct"],
+            "hdop"           : round(hdop, 2),
+        })
+        self._f.flush()
+
+    def close(self):
+        self._f.close()
+
+
+class CommandLog:
+    """
+    One row every time a motor command is sent — what was sent and why.
+
+    Columns
+    -------
+    timestamp       ISO-8601 wall clock
+    state           rover state when command was sent
+    command         "forward" | "turn" | "stop"
+    pwm_L1          left  front PWM sent  (0–255, negative = reverse)
+    pwm_L2          left  rear  PWM sent
+    pwm_R1          right front PWM sent
+    pwm_R2          right rear  PWM sent
+    paint_arm       0 or 1
+    reason          human-readable explanation of why this command was sent
+    """
+
+    COLUMNS = ["timestamp", "state", "command",
+               "pwm_L1", "pwm_L2", "pwm_R1", "pwm_R2",
+               "paint_arm", "reason"]
+
+    def __init__(self, stamp: str):
+        os.makedirs(LOG_DIR, exist_ok=True)
+        self.path = os.path.join(LOG_DIR, f"command_{stamp}.csv")
+        self._f   = open(self.path, "w", newline="")
+        self._w   = csv.DictWriter(self._f, fieldnames=self.COLUMNS)
+        self._w.writeheader()
+        print(f"[CommandLog] {self.path}")
+
+    def log(self, state: str, command: str,
+            pwm_L: int, pwm_R: int, paint: int, reason: str):
+        self._w.writerow({
+            "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+            "state"    : state,
+            "command"  : command,
+            "pwm_L1"   : pwm_L,
+            "pwm_L2"   : pwm_L,
+            "pwm_R1"   : pwm_R,
+            "pwm_R2"   : pwm_R,
+            "paint_arm": paint,
+            "reason"   : reason,
+        })
+        self._f.flush()
+
+    def close(self):
+        self._f.close()
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +135,7 @@ NUDGE_SAMPLES     = 3
 # ---------------------------------------------------------------------------
 
 def verify_arduino(ser, timeout=5.0) -> bool:
-    print("[Main] Waiting for Arduino READY signal ...")
+    print("[Main] Waiting for Arduino READY ...")
     deadline = time.time() + timeout
     while time.time() < deadline:
         if ser.in_waiting:
@@ -54,9 +148,9 @@ def verify_arduino(ser, timeout=5.0) -> bool:
                         ack = ser.readline().decode("ascii",
                                                     errors="replace").strip()
                         if ack == "ARMED":
-                            print("[Main] Arduino armed and ready.")
+                            print("[Main] Arduino armed.")
                             return True
-    print("[Main] WARNING: Could not arm Arduino — check connection.")
+    print("[Main] WARNING: Could not arm Arduino.")
     return False
 
 
@@ -65,7 +159,6 @@ def verify_arduino(ser, timeout=5.0) -> bool:
 # ---------------------------------------------------------------------------
 
 def averaged_fix(gnss: GNSSReader, n: int = NUDGE_SAMPLES) -> tuple:
-    """Average n GPS fixes to reduce single-fix jitter."""
     eastings, northings = [], []
     for _ in range(n):
         e, no = gnss.get_position()
@@ -75,10 +168,10 @@ def averaged_fix(gnss: GNSSReader, n: int = NUDGE_SAMPLES) -> tuple:
     return sum(eastings) / n, sum(northings) / n
 
 
-def ask_length(prompt: str) -> float:
+def ask_length() -> float:
     while True:
         try:
-            val = float(input(prompt).strip())
+            val = float(input("  Run length in metres: ").strip())
             if val > 0:
                 return val
             print("  Must be > 0.")
@@ -86,54 +179,18 @@ def ask_length(prompt: str) -> float:
             print("  Enter a number.")
 
 
-def do_nudge(gnss: GNSSReader, label: str) -> tuple:
-    """
-    Walk operator through recording two fixes for a heading nudge.
-    Returns (fix1, fix2).
-    """
-    print(f"\n[Main] {label} — stand rover at start, hold still.")
-    input("  Press ENTER to record fix_1 ...\n")
-    fix1 = averaged_fix(gnss)
-    print(f"  fix_1: E={fix1[0]:.3f}  N={fix1[1]:.3f}")
-
-    print("\n  Nudge rover ~1 m forward along desired direction, then stop.")
-    input("  Press ENTER to record fix_2 ...\n")
-    fix2 = averaged_fix(gnss)
-    print(f"  fix_2: E={fix2[0]:.3f}  N={fix2[1]:.3f}")
-
-    d = dist_m(fix1, fix2)
-    if d < 0.3:
-        print(f"  WARNING: nudge only {d:.2f} m — heading reference may be "
-              f"unreliable. Consider nudging further.")
-        input("  Press ENTER to continue or Ctrl+C to abort ...\n")
-
-    return fix1, fix2
-
-
 def print_header():
     print(f"\n  {'State':<12}  {'E':>9}  {'N':>9}  "
-          f"{'Dist':>5}  {'Rem':>5}  "
-          f"{'HdgGPS':>7}  {'HdgRef':>7}  "
-          f"{'PWM':>4}  ARM  Note")
-    print("  " + "-" * 80)
+          f"{'Dist':>5}  {'Rem':>5}  {'Cmd':<8}  Note")
+    print("  " + "-" * 65)
 
 
-def print_telemetry(result: dict):
-    arm  = "ON " if result["paint_arm"] else "OFF"
-    state = result["state"]
-
-    if state == STATE_TURNING:
-        note = f"turn {result['turn_progress_pct']:.0f}%"
-        pwm  = result["pwm_turn"]
-    else:
-        note = ""
-        pwm  = result["pwm_all"]
-
-    print(f"  {state:<12}  "
+def print_row(result: dict):
+    note = f"turn {result['turn_pct']:.0f}%" if result["state"] == STATE_TURN else ""
+    print(f"  {result['state']:<12}  "
           f"{result['easting']:>9.3f}  {result['northing']:>9.3f}  "
-          f"{result['dist_from_start']:>5.2f}  {result['dist_remaining']:>5.2f}  "
-          f"{result['heading_deg']:>7.1f}  {result['heading_ref_deg']:>7.1f}  "
-          f"{pwm:>4}  {arm}  {note}")
+          f"{result['dist']:>5.2f}  {result['remaining']:>5.2f}  "
+          f"{result['command']:<8}  {note}")
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +199,11 @@ def print_telemetry(result: dict):
 
 def main():
     print("\n" + "=" * 55)
-    print("  Rover v5 — Single Speed, GPS Stop, Timed Turn")
+    print("  Rover — Simple Path (single speed + timed turn)")
     print("=" * 55 + "\n")
+
+    # Shared timestamp for both log files
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # ------------------------------------------------------------------
     # Step 1: Arduino
@@ -166,89 +226,114 @@ def main():
         gnss.start()
     except RuntimeError as e:
         print(f"[Main] GPS ERROR: {e}")
-        send_motor_commands(ser, 0, False)
+        all_stop(ser)
         ser.close()
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # Step 3: Segment lengths
+    # Step 3: Length input
     # ------------------------------------------------------------------
-    print("\n[Main] Enter path dimensions.")
-    seg1_length = ask_length("  Segment 1 length (metres): ")
-    seg2_length = ask_length("  Segment 2 length (metres): ")
-    print(f"\n  Seg 1: {seg1_length:.2f} m  →  90° right turn  →  "
-          f"Seg 2: {seg2_length:.2f} m")
+    print("\n[Main] Enter run length.")
+    length_m = ask_length()
+    print(f"\n  Will drive {length_m:.2f} m  →  turn {TURN_DURATION_SEC}s  "
+          f"→  drive {length_m:.2f} m")
 
     # ------------------------------------------------------------------
-    # Step 4: Build follower
+    # Step 4: Record start fix
     # ------------------------------------------------------------------
-    follower = PathFollower(seg1_length, seg2_length)
+    print("\n[Main] Stand rover at start position.")
+    input("  Press ENTER to record start fix ...\n")
+    start_fix = averaged_fix(gnss)
+    print(f"  Start: E={start_fix[0]:.3f}  N={start_fix[1]:.3f}")
 
     # ------------------------------------------------------------------
-    # Step 5: Segment 1 nudge
+    # Step 5: Build follower and loggers
     # ------------------------------------------------------------------
-    fix1, fix2 = do_nudge(gnss, "SEGMENT 1 HEADING")
-    follower.set_segment_start(fix1)
-    follower.set_target_heading(fix1, fix2)
+    follower = SimplePathFollower(length_m)
+    follower.set_start(start_fix)
 
-    input("\n[Main] Press ENTER to start segment 1 ...\n")
+    track_log   = TrackLog(stamp)
+    command_log = CommandLog(stamp)
+
+    input("\n[Main] Press ENTER to start ...\n")
 
     # ------------------------------------------------------------------
-    # Control loop
+    # Step 6: Control loop
     # ------------------------------------------------------------------
     print_header()
-    seg2_ready = False
+    seg2_started = False
+    prev_command = None   # track command changes for command log
 
     try:
-        while not follower.is_finished():
+        while not follower.is_done():
             loop_start = time.time()
 
-            # Drain any serial from Arduino (errors, status lines)
-            # No encoder reads needed
+            # Drain Arduino serial (no encoders — just discard)
             while ser.in_waiting:
                 echo = ser.readline().decode("ascii", errors="replace").strip()
                 if echo.startswith("ERR"):
                     print(f"  [Arduino] {echo}")
 
             current_pos = gnss.get_position()
-            result      = follower.step(current_pos)
-            state       = result["state"]
+            info        = gnss.get_fix_info()
 
-            # ----------------------------------------------------------
-            # Pause after turn completes to collect seg 2 nudge
-            # ----------------------------------------------------------
-            if state == STATE_STRAIGHT_2 and not seg2_ready:
-                # Motors already zeroed by transition — rover is stopped
-                print("\n[Main] Turn complete. Rover facing segment 2.")
-                fix1_s2, fix2_s2 = do_nudge(gnss, "SEGMENT 2 HEADING")
-                follower.set_segment_start(fix1_s2)
-                follower.set_target_heading(fix1_s2, fix2_s2)
-                seg2_ready = True
+            # -- Pause after turn to record seg 2 start ----------------
+            if follower.current_state() == STATE_SEG2 and not seg2_started:
+                all_stop(ser)
+                command_log.log(STATE_SEG2, "stop",
+                                0, 0, 0,
+                                "Turn complete — waiting for seg 2 start fix")
+                print("\n[Main] Turn complete. Hold rover still.")
+                input("  Press ENTER to record seg 2 start fix ...\n")
+                seg2_fix = averaged_fix(gnss)
+                follower.set_start(seg2_fix)
+                seg2_started = True
                 print_header()
-                input("\n[Main] Press ENTER to start segment 2 ...\n")
-                continue   # re-run step() now that heading is set
+                input("[Main] Press ENTER to start segment 2 ...\n")
+                continue
 
-            # ----------------------------------------------------------
-            # Motor commands
-            # ----------------------------------------------------------
-            if state == STATE_TURNING:
-                send_turn_command(ser,
-                                  result["pwm_turn"],
-                                  result["pwm_turn"],
-                                  False)
+            # -- Controller --------------------------------------------
+            result  = follower.step(current_pos)
+            command = result["command"]
+            state   = result["state"]
+
+            # -- Motor commands ----------------------------------------
+            if command == "forward":
+                all_forward(ser, arm=True)
+                pwm_L, pwm_R, paint = PWM_BASE, PWM_BASE, 1
+                reason = (f"driving forward — "
+                          f"{result['dist']:.2f}/{length_m:.2f} m")
+
+            elif command == "turn":
+                turn_right(ser)
+                pwm_L, pwm_R, paint = PWM_TURN, -PWM_TURN, 0
+                reason = (f"point turn right — "
+                          f"{result['turn_elapsed']:.1f}/{TURN_DURATION_SEC}s "
+                          f"({result['turn_pct']:.0f}%)")
+
+            else:  # stop (transition or done)
+                all_stop(ser)
+                pwm_L, pwm_R, paint = 0, 0, 0
+                reason = f"transition or segment complete — state={state}"
+
+            # -- Log every cycle ---------------------------------------
+            track_log.log(result, info["hdop"])
+
+            # Log command on every cycle AND whenever it changes
+            if command != prev_command:
+                command_log.log(state, command, pwm_L, pwm_R, paint,
+                                f"COMMAND CHANGE: {reason}")
             else:
-                send_motor_commands(ser,
-                                    result["pwm_all"],
-                                    result["paint_arm"])
+                command_log.log(state, command, pwm_L, pwm_R, paint, reason)
+            prev_command = command
 
-            # GPS fix quality warning
-            info = gnss.get_fix_info()
+            # -- GPS quality warning -----------------------------------
             if info["hdop"] > 3.0:
                 print(f"  [GPS] HDOP={info['hdop']:.1f} — fix quality poor")
 
-            print_telemetry(result)
+            print_row(result)
 
-            # Loop rate
+            # -- Loop rate ---------------------------------------------
             elapsed = time.time() - loop_start
             sleep_t = LOOP_DT - elapsed
             if sleep_t > 0:
@@ -256,13 +341,22 @@ def main():
 
     except KeyboardInterrupt:
         print("\n[Main] Interrupted by user.")
+        command_log.log(follower.current_state(), "stop",
+                        0, 0, 0, "KeyboardInterrupt — operator stopped run")
 
     finally:
         print("\n[Main] Stopping motors ...")
-        send_motor_commands(ser, 0, False)
+        all_stop(ser)
+        command_log.log(follower.current_state(), "stop",
+                        0, 0, 0, "Shutdown — motors zeroed")
         ser.write(b"STOP\n")
         gnss.stop()
+        track_log.close()
+        command_log.close()
         ser.close()
+        print(f"\n[Main] Logs saved to '{LOG_DIR}/'")
+        print(f"         track_{stamp}.csv")
+        print(f"         command_{stamp}.csv")
         print("[Main] Done.")
 
 
