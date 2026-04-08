@@ -15,15 +15,13 @@ Outputs (via serial to Arduino):
 Motor direction is handled by the Arduino high/low direction pins.
 Left-side and right-side motors always receive the same PWM value.
 
-Servo is driven directly from the Raspberry Pi GPIO (not Arduino).
-  - ARM ON  → servo moves to 40° (paint arm down)
-  - ARM OFF → servo sweeps to 67° then signal is cut (arm lifts, stays off)
+The Arduino runs a per-wheel P-controller using hall-effect encoders.
+Python sends 0–255 setpoints; the Arduino converts these to target RPM
+and closes the velocity loop internally. This file does not send raw
+PWM — it sends speed setpoints that the Arduino tracks.
 """
 
 import math
-import time
-
-import RPi.GPIO as GPIO
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +30,7 @@ import RPi.GPIO as GPIO
 K1 = 1.0          # Heading error gain
 K2 = 0.5          # Lateral error gain
 WHEELBASE = 0.6   # Distance between left and right wheels (metres)
-BASE_SPEED = 0.5  # Nominal forward speed (m/s)
+BASE_SPEED = 0.2  # Nominal forward speed (m/s)
 LOOK_AHEAD = 2.0  # Look-ahead offset along path (metres)
 WP_ACCEPT_RADIUS = 1.0  # Distance (m) at which we consider a waypoint reached
 
@@ -49,27 +47,46 @@ def open_serial():
     return serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
 
 
-def send_motor_commands(ser, pwm_L: int, pwm_R: int, arm: bool):
+# ---------------------------------------------------------------------------
+# Speed → PWM conversion
+# ---------------------------------------------------------------------------
+
+MAX_SPEED_MS = 1.5   # m/s that maps to PWM 255 — calibrate to your rover
+
+def speed_to_pwm(speed_ms: float) -> int:
     """
-    Send PWM commands to Arduino over serial.
+    Linear mapping from m/s to Arduino PWM setpoint [0, 255].
+    The Arduino treats this as a target speed (via hall-effect P-controller),
+    not a direct PWM write. Negative speeds are clamped to 0 — motor
+    direction is handled by the Arduino direction pins.
+    """
+    speed_ms = max(0.0, speed_ms)
+    pwm = (speed_ms / MAX_SPEED_MS) * 255.0
+    return int(min(255, pwm))
+
+
+def send_motor_commands(ser, v_L_ms: float, v_R_ms: float, arm: bool):
+    """
+    Convert m/s wheel speeds to 0–255 setpoints and send to Arduino.
+
+    The Arduino P-controller uses these as target speeds (scaled internally
+    to RPM via MAX_TARGET_RPM), not as direct PWM writes.
 
     Format: "L1:<v>,L2:<v>,R1:<v>,R2:<v>,ARM:<v>\\n"
-      - L1/L2 : front-left and rear-left motors  (0–255)
-      - R1/R2 : front-right and rear-right motors (0–255)
+      - L1/L2 : front-left and rear-left setpoints  (0–255)
+      - R1/R2 : front-right and rear-right setpoints (0–255)
       - ARM   : servo paint arm (0 or 1)
 
     Both left motors receive the same value; same for right.
-    Motor direction (forward/reverse) is set by the Arduino
-    direction pins — PWM here is always a positive magnitude.
 
     Parameters
     ----------
-    pwm_L : int  Left-side PWM magnitude [0, 255]
-    pwm_R : int  Right-side PWM magnitude [0, 255]
-    arm   : bool True = paint arm down (servo ON)
+    v_L_ms : float  Left-side target speed in m/s
+    v_R_ms : float  Right-side target speed in m/s
+    arm    : bool   True = paint arm down (servo ON)
     """
-    pwm_L = int(max(0, min(255, pwm_L)))
-    pwm_R = int(max(0, min(255, pwm_R)))
+    pwm_L   = speed_to_pwm(v_L_ms)
+    pwm_R   = speed_to_pwm(v_R_ms)
     arm_val = 1 if arm else 0
     cmd = f"L1:{pwm_L},L2:{pwm_L},R1:{pwm_R},R2:{pwm_R},ARM:{arm_val}\n"
     ser.write(cmd.encode())
@@ -114,23 +131,6 @@ def normalize_angle(angle):
     while angle < -math.pi:
         angle += 2 * math.pi
     return angle
-
-
-# ---------------------------------------------------------------------------
-# Speed → PWM conversion
-# ---------------------------------------------------------------------------
-
-MAX_SPEED_MS = 1.5   # m/s that maps to PWM 255 — calibrate to your rover
-
-def speed_to_pwm(speed_ms: float) -> int:
-    """
-    Linear mapping from m/s to Arduino PWM [0, 255].
-    Negative speeds are clamped to 0 — direction is handled by the
-    Arduino high/low direction pins, not the PWM magnitude.
-    """
-    speed_ms = max(0.0, speed_ms)          # clamp — no negative PWM
-    pwm = (speed_ms / MAX_SPEED_MS) * 255.0
-    return int(min(255, pwm))
 
 
 # ---------------------------------------------------------------------------
@@ -245,21 +245,21 @@ class PathFollower:
     # ------------------------------------------------------------------
     def compute_wheel_speeds(self, delta_t):
         """
-        Convert steering correction angle to left/right PWM magnitudes.
+        Convert steering correction angle to left/right speed setpoints (m/s).
 
         curvature = tan(delta_t) / WHEELBASE
         v_L = BASE_SPEED * (1 - (WHEELBASE/2) * curvature)
         v_R = BASE_SPEED * (1 + (WHEELBASE/2) * curvature)
 
-        Speeds are kept as positive magnitudes [0, 255].
-        The Arduino handles forward/reverse via its direction pins.
-
-        Returns (pwm_L, pwm_R) as integers in [0, 255].
+        Returns (v_L_ms, v_R_ms) as floats in m/s.
+        send_motor_commands() converts these to 0–255 before sending.
         """
         curvature = math.tan(delta_t) / WHEELBASE
         v_L_ms = BASE_SPEED * (1.0 - (WHEELBASE / 2.0) * curvature)
         v_R_ms = BASE_SPEED * (1.0 + (WHEELBASE / 2.0) * curvature)
-        return speed_to_pwm(v_L_ms), speed_to_pwm(v_R_ms)
+        v_L_ms = max(-MAX_SPEED_MS, min(MAX_SPEED_MS, v_L_ms))
+        v_R_ms = max(-MAX_SPEED_MS, min(MAX_SPEED_MS, v_R_ms))
+        return v_L_ms, v_R_ms
 
     # ------------------------------------------------------------------
     # Waypoint advancement
@@ -271,7 +271,6 @@ class PathFollower:
         Returns True if waypoints were advanced.
         """
         if self.prev_IC is not None and self.prev_IC * IC < 0:
-            # Sign flip detected — rover crossed the wp_b threshold
             if self.wp_index < len(self.waypoints) - 2:
                 self.wp_index += 1
                 print(f"[PathFollower] Advanced to segment "
@@ -282,111 +281,12 @@ class PathFollower:
     # ------------------------------------------------------------------
     # Paint arm logic
     # ------------------------------------------------------------------
-    #
-    # The servo is driven directly from a Raspberry Pi GPIO pin using
-    # hardware PWM (50 Hz). Duty cycle is mapped from angle in degrees:
-    #
-    #   duty = 2.5 + (angle / 180.0) * 10.0
-    #
-    # which gives ~2.5% at 0° and ~12.5% at 180°, matching most
-    # standard hobby servos.
-    #
-    # Behaviour:
-    #   arm_on()  → move to SERVO_ANGLE_ON  (40°) — paint arm down
-    #   arm_off() → sweep to SERVO_ANGLE_OFF (67°) step-by-step,
-    #               then immediately cut the PWM signal so the servo
-    #               holds position passively and draws no current.
-    #
-    # Call servo_setup() once before the control loop and
-    # servo_cleanup() on exit to release the GPIO pin.
-    # ------------------------------------------------------------------
-
-    SERVO_GPIO_PIN   = 18          # BCM pin — change to match your wiring
-    SERVO_PWM_FREQ   = 50          # Hz — standard for hobby servos
-    SERVO_ANGLE_ON   = 40          # degrees — paint arm down
-    SERVO_ANGLE_OFF  = 67          # degrees — paint arm up / parked
-    SERVO_SWEEP_STEP = 1           # degrees per step during off-sweep
-    SERVO_SWEEP_DELAY = 0.015      # seconds between steps (≈ 15 ms, matches Arduino test)
-
-    _servo_pwm       = None        # RPi.GPIO PWM instance (class-level singleton)
-    _servo_active    = False       # True while PWM signal is running
-    _arm_state       = False       # Last commanded arm state
-
-    @staticmethod
-    def _angle_to_duty(angle_deg: float) -> float:
-        """Convert servo angle (0–180°) to duty cycle (%) for 50 Hz PWM."""
-        return 2.5 + (angle_deg / 180.0) * 10.0
-
-    @classmethod
-    def servo_setup(cls):
-        """Initialise GPIO and start PWM. Call once before the control loop."""
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(cls.SERVO_GPIO_PIN, GPIO.OUT)
-        cls._servo_pwm = GPIO.PWM(cls.SERVO_GPIO_PIN, cls.SERVO_PWM_FREQ)
-        # Start with PWM stopped (duty=0); arm_on/arm_off will activate it
-        cls._servo_pwm.start(0)
-        cls._servo_active = False
-        cls._arm_state = False
-
-    @classmethod
-    def servo_cleanup(cls):
-        """Stop PWM and release GPIO. Call on exit."""
-        if cls._servo_pwm is not None:
-            cls._servo_pwm.stop()
-        GPIO.cleanup()
-        cls._servo_active = False
-
-    @classmethod
-    def arm_on(cls):
-        """
-        Move servo to SERVO_ANGLE_ON (40°) — paint arm down.
-        Activates the PWM signal if it was previously cut.
-        """
-        if cls._arm_state:
-            return  # already on, nothing to do
-
-        duty = cls._angle_to_duty(cls.SERVO_ANGLE_ON)
-        cls._servo_pwm.ChangeDutyCycle(duty)
-        cls._servo_active = True
-        cls._arm_state = True
-
-    @classmethod
-    def arm_off(cls):
-        """
-        Sweep servo from SERVO_ANGLE_ON (40°) to SERVO_ANGLE_OFF (67°),
-        then immediately cut the PWM signal (duty = 0) so the servo
-        holds its position passively without drawing current.
-        """
-        if not cls._arm_state:
-            return  # already off, nothing to do
-
-        # Step from current on-position up to the off-position
-        for angle in range(cls.SERVO_ANGLE_ON, cls.SERVO_ANGLE_OFF + 1,
-                           cls.SERVO_SWEEP_STEP):
-            cls._servo_pwm.ChangeDutyCycle(cls._angle_to_duty(angle))
-            time.sleep(cls.SERVO_SWEEP_DELAY)
-
-        # Cut signal — servo holds 67° passively
-        cls._servo_pwm.ChangeDutyCycle(0)
-        cls._servo_active = False
-        cls._arm_state = False
-
     def paint_arm_active(self, t):
         """
         Paint arm is ON while the rover is between wp_a and wp_b
         (0 <= t <= 1). Extend this with more nuanced logic as needed.
         """
         return 0.0 <= t <= 1.0
-
-    def update_paint_arm(self, active: bool):
-        """
-        Drive the servo to match the desired arm state.
-        Calls arm_on() or arm_off() only on state transitions.
-        """
-        if active:
-            self.arm_on()
-        else:
-            self.arm_off()
 
     # ------------------------------------------------------------------
     # Main step — call this at every control loop iteration
@@ -405,7 +305,7 @@ class PathFollower:
         Returns
         -------
         dict with keys: pwm_L, pwm_R, paint_arm, t, head_angle_error,
-                        lateral_error, delta_t, guiding_angle
+                        lateral_error, delta_t, guiding_angle, status
         """
         if self.is_finished():
             return {"pwm_L": 0, "pwm_R": 0, "paint_arm": False,
@@ -414,7 +314,7 @@ class PathFollower:
         # Derive heading from consecutive GPS positions
         actual_heading = heading_from_points(prev_P, P)
 
-        # Use gnss_reader speed if provided, otherwise estimate from dist_step
+        # Use gnss_reader speed if provided, otherwise estimate from positions
         if speed is None:
             speed = norm2d(vec2d(prev_P, P))  # rough fallback
 
@@ -433,16 +333,15 @@ class PathFollower:
         delta_t, guiding_angle = self.compute_steering(
             head_angle_error, lateral_error, speed)
 
-        # Wheel speeds
-        pwm_L, pwm_R = self.compute_wheel_speeds(delta_t)
+        # Wheel speeds (m/s) — converted to 0–255 in send_motor_commands()
+        v_L_ms, v_R_ms = self.compute_wheel_speeds(delta_t)
 
-        # Paint arm — determine desired state and drive servo
+        # Paint arm
         paint = self.paint_arm_active(t)
-        self.update_paint_arm(paint)
 
         return {
-            "pwm_L": pwm_L,
-            "pwm_R": pwm_R,
+            "pwm_L": v_L_ms,    # named pwm_L for compatibility with main.py,
+            "pwm_R": v_R_ms,    # but values are m/s floats passed to send_motor_commands()
             "paint_arm": paint,
             "t": t,
             "head_angle_error": math.degrees(head_angle_error),
@@ -458,7 +357,6 @@ class PathFollower:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Placeholder waypoints — replace with output from path_planner
     waypoints = [
         (500.0, 1000.0),
         (520.0, 1000.0),
@@ -467,16 +365,12 @@ if __name__ == "__main__":
     follower = PathFollower(waypoints)
     ser = open_serial()
 
-    # Initialise GPIO servo
-    PathFollower.servo_setup()
-
-    # Seed with a starting position (first GPS fix)
     prev_P = waypoints[0]
 
     try:
         while not follower.is_finished():
             # ---- Replace this block with your gnss_reader call ----
-            P = (501.0, 1000.3)   # example: current GPS fix
+            P = (501.0, 1000.3)
             # -------------------------------------------------------
 
             result = follower.step(P, prev_P)
@@ -487,7 +381,7 @@ if __name__ == "__main__":
                                 result["pwm_R"],
                                 result["paint_arm"])
 
-            print(f"PWM L={result['pwm_L']:3d}  R={result['pwm_R']:3d} | "
+            print(f"vL={result['pwm_L']:.3f}m/s  vR={result['pwm_R']:.3f}m/s | "
                   f"ARM={'ON ' if result['paint_arm'] else 'OFF'} | "
                   f"TE={result['lateral_error']:+.3f}m  "
                   f"HE={result['head_angle_error']:+.1f}°")
@@ -496,6 +390,4 @@ if __name__ == "__main__":
         send_motor_commands(ser, 0, 0, False)
         print("Stopped.")
     finally:
-        PathFollower.arm_off()      # park servo before shutdown
-        PathFollower.servo_cleanup()
         ser.close()
