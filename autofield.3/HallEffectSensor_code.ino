@@ -5,16 +5,16 @@
 // ========================
 
 // PWM (must be PWM pins)
-const int LF_PWM = 3;
-const int LB_PWM = 5;
-const int RF_PWM = 6;
-const int RB_PWM = 11;
+const int LF_PWM = 5;
+const int LB_PWM = 3;
+const int RF_PWM = 9;
+const int RB_PWM = 6;
 
 // Direction pins
-const int LF_DIR = 2;
-const int LB_DIR = 4;
-const int RF_DIR = 7;
-const int RB_DIR = 8;
+const int LF_DIR = 4;
+const int LB_DIR = 2;
+const int RF_DIR = 8;
+const int RB_DIR = 7;
 
 // Servo
 Servo paintArm;
