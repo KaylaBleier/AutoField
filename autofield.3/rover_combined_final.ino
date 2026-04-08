@@ -14,8 +14,8 @@ const int LB_DIR = 2;
 const int RF_DIR = 8;
 const int RB_DIR = 7;
 
-const int SERVO_SIG_PIN = 10;
-const int SERVO_REF_PIN = 12;
+const int SERVO_SIG_PIN = 12;
+//const int SERVO_REF_PIN = 12;
 
 const int HALL_BL = A5;
 const int HALL_FL = A0;
@@ -26,8 +26,8 @@ const int HALL_BR = A4;
 // SERVO
 // ===========================================================================
 Servo paintArm;
-const int SERVO_OFF_ANGLE = 70;
-const int SERVO_ON_ANGLE  = 40;
+const int SERVO_OFF_ANGLE = 0; //no paint
+const int SERVO_ON_ANGLE  = 29; //painting
 bool prevArmState = false;
 
 // ===========================================================================
