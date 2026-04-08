@@ -53,16 +53,16 @@
 // ===========================================================================
 
 // Motor PWM — hardware-PWM pins only on Uno (3, 5, 6, 9, 10, 11)
-const int LF_PWM = 3;
-const int LB_PWM = 5;
-const int RF_PWM = 6;
-const int RB_PWM = 11;
+const int LF_PWM = 5;
+const int LB_PWM = 3;
+const int RF_PWM = 9;
+const int RB_PWM = 6;
 
 // Motor direction — any digital GPIO
-const int LF_DIR = 2;
-const int LB_DIR = 4;
-const int RF_DIR = 7;
-const int RB_DIR = 8;
+const int LF_DIR = 4;
+const int LB_DIR = 2;
+const int RF_DIR = 8;
+const int RB_DIR = 7;
 
 // Servo
 const int SERVO_SIG_PIN = 10;
