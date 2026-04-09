@@ -1,0 +1,312 @@
+"""
+main.py
+
+Entry point for the rover on test day.
+
+Sequence:
+    1. Open Arduino serial connection
+    2. Start GNSSReader background thread
+    3. Wait for GPS fix → print "GPS FIXED" confirmation
+    4. Run waypoint_gen → two-fix nudge flow → wp1, wp2, heading
+    5. Run control loop → drive wp1 → wp2
+    6. Stop motors, lift paint arm, close logs
+
+Logs written to ./logs/ each run (timestamped):
+    track_log_<timestamp>.csv   — position + errors every tick
+    command_log_<timestamp>.csv — every Arduino command sent
+
+Usage:
+    python main.py
+"""
+
+import csv
+import os
+import sys
+import time
+from datetime import datetime
+
+from gnss_reader import GNSSReader
+from waypoint_gen import run_waypoint_setup
+from path_following import PathFollower, open_serial, send_motor_commands
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+GNSS_PORT  = "COM5"
+GNSS_BAUD  = 57600
+
+LOOP_HZ    = 5
+LOOP_DT    = 1.0 / LOOP_HZ
+
+LOG_DIR    = "logs"
+
+# How long to wait for GPS fix quality before giving up (seconds)
+GPS_FIX_TIMEOUT = 60
+
+# Minimum fix quality required to proceed (1=GPS, 2=DGPS, 4=RTK fixed, 5=RTK float)
+MIN_FIX_QUALITY = 1
+
+# HDOP threshold — warn if worse than this
+HDOP_WARN = 3.0
+
+# Arduino boot wait after opening serial
+ARDUINO_BOOT_WAIT = 2.0
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def _make_logger(name: str, fieldnames: list):
+    """Create a CSV logger in LOG_DIR. Returns (file_handle, DictWriter)."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path  = os.path.join(LOG_DIR, f"{name}_{stamp}.csv")
+    f     = open(path, "w", newline="")
+    w     = csv.DictWriter(f, fieldnames=fieldnames)
+    w.writeheader()
+    print(f"[Log] {name} → {path}")
+    return f, w, path
+
+
+TRACK_FIELDS = [
+    "timestamp", "easting", "northing",
+    "heading_error_deg", "lateral_error_m", "progress_t", "paint_arm",
+]
+
+COMMAND_FIELDS = [
+    "timestamp", "pwm_L", "pwm_R", "arm",
+    "heading_error_deg", "lateral_error_m",
+]
+
+
+# ---------------------------------------------------------------------------
+# GPS fix confirmation
+# ---------------------------------------------------------------------------
+
+def wait_for_fix(gnss: GNSSReader, timeout: float) -> bool:
+    """
+    Block until the GNSSReader reports fix_quality >= MIN_FIX_QUALITY.
+    Prints a live status line. Returns True if fix acquired, False if timed out.
+    """
+    print(f"\n[GPS] Waiting for fix (timeout {timeout}s) ...")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        info = gnss.get_fix_info()
+        if info["fix_quality"] >= MIN_FIX_QUALITY and info["position"] is not None:
+            hdop = info["hdop"]
+            sats = info["num_sats"]
+            pos  = info["position"]
+            print(f"\n{'='*45}")
+            print(f"  GPS FIXED")
+            print(f"  E={pos[0]:.3f}  N={pos[1]:.3f}")
+            print(f"  Satellites: {sats}   HDOP: {hdop:.1f}")
+            if hdop > HDOP_WARN:
+                print(f"  WARNING: HDOP {hdop:.1f} is high — fix quality poor")
+            print(f"{'='*45}\n")
+            return True
+        # Live status
+        print(f"\r  sats={info['num_sats']}  HDOP={info['hdop']:.1f}  "
+              f"quality={info['fix_quality']}  waiting...", end="", flush=True)
+        time.sleep(0.5)
+    print("\n[GPS] ERROR: Timed out waiting for fix.")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Arduino handshake
+# ---------------------------------------------------------------------------
+
+def verify_arduino(ser, timeout: float = 5.0) -> bool:
+    """
+    Wait for READY signal, respond with START, wait for ARMED.
+    Returns True if armed, False if timed out.
+    """
+    print("[Arduino] Waiting for READY ...")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if ser.in_waiting:
+            line = ser.readline().decode("ascii", errors="replace").strip()
+            if line == "READY":
+                ser.write(b"START\n")
+                arm_deadline = time.time() + 2.0
+                while time.time() < arm_deadline:
+                    if ser.in_waiting:
+                        ack = ser.readline().decode("ascii", errors="replace").strip()
+                        if ack == "ARMED":
+                            print("[Arduino] Armed and ready.")
+                            return True
+        time.sleep(0.05)
+    print("[Arduino] WARNING: No READY/ARMED handshake received.")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    print("\n" + "=" * 55)
+    print("  Rover — Startup")
+    print("=" * 55 + "\n")
+
+    # ------------------------------------------------------------------
+    # Step 1: Arduino serial
+    # ------------------------------------------------------------------
+    print("[Main] Connecting to Arduino ...")
+    try:
+        ser = open_serial()
+    except Exception as e:
+        print(f"[Main] ERROR: Cannot open Arduino serial port.\n  {e}")
+        sys.exit(1)
+
+    time.sleep(ARDUINO_BOOT_WAIT)
+    verify_arduino(ser)
+
+    # ------------------------------------------------------------------
+    # Step 2: GNSS reader
+    # ------------------------------------------------------------------
+    gnss = GNSSReader(port=GNSS_PORT, baud=GNSS_BAUD)
+    try:
+        gnss.start()
+    except RuntimeError as e:
+        print(f"[Main] GPS ERROR: {e}")
+        send_motor_commands(ser, 0, 0, False)
+        ser.close()
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Step 3: Confirm GPS fix quality
+    # ------------------------------------------------------------------
+    if not wait_for_fix(gnss, GPS_FIX_TIMEOUT):
+        send_motor_commands(ser, 0, 0, False)
+        gnss.stop()
+        ser.close()
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Step 4 & 5: Waypoint setup (two-fix nudge)
+    # ------------------------------------------------------------------
+    try:
+        wp1, wp2, heading_rad = run_waypoint_setup(gnss)
+    except RuntimeError as e:
+        print(f"[Main] Waypoint ERROR: {e}")
+        send_motor_commands(ser, 0, 0, False)
+        gnss.stop()
+        ser.close()
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Confirm before running
+    # ------------------------------------------------------------------
+    import math
+    dist = math.sqrt((wp2[0]-wp1[0])**2 + (wp2[1]-wp1[1])**2)
+    print(f"\n[Main] Ready to run.")
+    print(f"       Start : E={wp1[0]:.3f}  N={wp1[1]:.3f}")
+    print(f"       Target: E={wp2[0]:.3f}  N={wp2[1]:.3f}")
+    print(f"       Distance: {dist:.2f} m  @ {math.degrees(heading_rad):.1f}°")
+    input("\n[Main] Press ENTER to start the rover ...\n")
+
+    # ------------------------------------------------------------------
+    # Open logs
+    # ------------------------------------------------------------------
+    track_f,   track_w,   track_path   = _make_logger("track_log",   TRACK_FIELDS)
+    command_f, command_w, command_path = _make_logger("command_log", COMMAND_FIELDS)
+
+    # ------------------------------------------------------------------
+    # Step 6: Control loop
+    # ------------------------------------------------------------------
+    follower = PathFollower(wp1, wp2, heading_rad)
+    prev_P   = gnss.get_position()
+
+    print("[Main] Rover running. Press Ctrl+C to e-stop.\n")
+
+    try:
+        while not follower.is_finished():
+            loop_start = time.time()
+
+            P     = gnss.get_position()
+            speed = gnss.get_speed()
+
+            result = follower.step(P, prev_P, speed_ms=speed)
+            prev_P = P
+
+            # Send to Arduino
+            send_motor_commands(ser,
+                                result["pwm_L"],
+                                result["pwm_R"],
+                                result["paint_arm"])
+
+            now = datetime.now().isoformat(timespec="milliseconds")
+
+            # Track log
+            track_w.writerow({
+                "timestamp"        : now,
+                "easting"          : round(P[0], 4),
+                "northing"         : round(P[1], 4),
+                "heading_error_deg": round(result["heading_error"], 2),
+                "lateral_error_m"  : round(result["lateral_error"], 4),
+                "progress_t"       : round(result["t"], 4),
+                "paint_arm"        : 1 if result["paint_arm"] else 0,
+            })
+            track_f.flush()
+
+            # Command log
+            command_w.writerow({
+                "timestamp"        : now,
+                "pwm_L"            : result["pwm_L"],
+                "pwm_R"            : result["pwm_R"],
+                "arm"              : 1 if result["paint_arm"] else 0,
+                "heading_error_deg": round(result["heading_error"], 2),
+                "lateral_error_m"  : round(result["lateral_error"], 4),
+            })
+            command_f.flush()
+
+            # Read any Arduino echo (non-blocking)
+            if ser.in_waiting:
+                echo = ser.readline().decode("ascii", errors="replace").strip()
+                if echo.startswith("ERR"):
+                    print(f"  [Arduino] {echo}")
+
+            # HDOP warning
+            info = gnss.get_fix_info()
+            if info["hdop"] > HDOP_WARN:
+                print(f"  [GPS] HDOP={info['hdop']:.1f} — fix quality poor")
+
+            # Status line
+            arm_str = "ON " if result["paint_arm"] else "OFF"
+            print(f"  L={result['pwm_L']:3d} R={result['pwm_R']:3d} | "
+                  f"ARM={arm_str} | "
+                  f"HE={result['heading_error']:+.1f}° "
+                  f"LE={result['lateral_error']:+.3f}m "
+                  f"t={result['t']:.2f} "
+                  f"spd={speed:.2f}m/s")
+
+            if result["status"] == "finished":
+                break
+
+            # Hold loop rate
+            elapsed = time.time() - loop_start
+            sleep_t = LOOP_DT - elapsed
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+
+    except KeyboardInterrupt:
+        print("\n[Main] E-STOP — interrupted by user.")
+
+    finally:
+        print("\n[Main] Stopping motors and lifting paint arm ...")
+        send_motor_commands(ser, 0, 0, False)
+        ser.write(b"STOP\n")
+        gnss.stop()
+        track_f.close()
+        command_f.close()
+        ser.close()
+        print(f"[Main] Track log  : {track_path}")
+        print(f"[Main] Command log: {command_path}")
+        print("[Main] Done.\n")
+
+
+if __name__ == "__main__":
+    main()
