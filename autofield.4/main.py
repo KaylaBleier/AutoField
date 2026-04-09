@@ -11,7 +11,7 @@ Sequence:
     5. Run control loop → drive wp1 → wp2
     6. Stop motors, lift paint arm, close logs
 
-Logs written to ./logs/ each run (timestamped):
+Logs written to logs/ each run (timestamped):
     track_log_<timestamp>.csv   — position + errors every tick
     command_log_<timestamp>.csv — every Arduino command sent
 
@@ -20,37 +20,28 @@ Usage:
 """
 
 import csv
+import math
 import os
 import sys
 import time
 from datetime import datetime
 
+from config_loader import CFG
 from gnss_reader import GNSSReader
 from waypoint_gen import run_waypoint_setup
 from path_following import PathFollower, open_serial, send_motor_commands
 
-
 # ---------------------------------------------------------------------------
-# Config
+# Config shortcuts
 # ---------------------------------------------------------------------------
-GNSS_PORT  = "COM5"
-GNSS_BAUD  = 57600
-
-LOOP_HZ    = 5
-LOOP_DT    = 1.0 / LOOP_HZ
-
-LOG_DIR    = "logs"
-
-# How long to wait for GPS fix quality before giving up (seconds)
-GPS_FIX_TIMEOUT = 60
-
-# Minimum fix quality required to proceed (1=GPS, 2=DGPS, 4=RTK fixed, 5=RTK float)
-MIN_FIX_QUALITY = 1
-
-# HDOP threshold — warn if worse than this
-HDOP_WARN = 3.0
-
-# Arduino boot wait after opening serial
+GNSS_PORT         = CFG["serial"]["gnss_port"]
+GNSS_BAUD         = CFG["serial"]["gnss_baud"]
+LOOP_HZ           = CFG["control"]["loop_hz"]
+LOOP_DT           = 1.0 / LOOP_HZ
+GPS_FIX_TIMEOUT   = CFG["gps"]["fix_timeout_s"]
+MIN_FIX_QUALITY   = CFG["gps"]["min_fix_quality"]
+HDOP_WARN         = CFG["gps"]["hdop_warn"]
+LOG_DIR           = CFG["logging"]["log_dir"]
 ARDUINO_BOOT_WAIT = 2.0
 
 
@@ -59,7 +50,6 @@ ARDUINO_BOOT_WAIT = 2.0
 # ---------------------------------------------------------------------------
 
 def _make_logger(name: str, fieldnames: list):
-    """Create a CSV logger in LOG_DIR. Returns (file_handle, DictWriter)."""
     os.makedirs(LOG_DIR, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path  = os.path.join(LOG_DIR, f"{name}_{stamp}.csv")
@@ -86,10 +76,6 @@ COMMAND_FIELDS = [
 # ---------------------------------------------------------------------------
 
 def wait_for_fix(gnss: GNSSReader, timeout: float) -> bool:
-    """
-    Block until the GNSSReader reports fix_quality >= MIN_FIX_QUALITY.
-    Prints a live status line. Returns True if fix acquired, False if timed out.
-    """
     print(f"\n[GPS] Waiting for fix (timeout {timeout}s) ...")
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -106,7 +92,6 @@ def wait_for_fix(gnss: GNSSReader, timeout: float) -> bool:
                 print(f"  WARNING: HDOP {hdop:.1f} is high — fix quality poor")
             print(f"{'='*45}\n")
             return True
-        # Live status
         print(f"\r  sats={info['num_sats']}  HDOP={info['hdop']:.1f}  "
               f"quality={info['fix_quality']}  waiting...", end="", flush=True)
         time.sleep(0.5)
@@ -119,10 +104,6 @@ def wait_for_fix(gnss: GNSSReader, timeout: float) -> bool:
 # ---------------------------------------------------------------------------
 
 def verify_arduino(ser, timeout: float = 5.0) -> bool:
-    """
-    Wait for READY signal, respond with START, wait for ARMED.
-    Returns True if armed, False if timed out.
-    """
     print("[Arduino] Waiting for READY ...")
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -186,7 +167,7 @@ def main():
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # Step 4 & 5: Waypoint setup (two-fix nudge)
+    # Steps 4 & 5: Waypoint setup (two-fix nudge)
     # ------------------------------------------------------------------
     try:
         wp1, wp2, heading_rad = run_waypoint_setup(gnss)
@@ -200,7 +181,6 @@ def main():
     # ------------------------------------------------------------------
     # Confirm before running
     # ------------------------------------------------------------------
-    import math
     dist = math.sqrt((wp2[0]-wp1[0])**2 + (wp2[1]-wp1[1])**2)
     print(f"\n[Main] Ready to run.")
     print(f"       Start : E={wp1[0]:.3f}  N={wp1[1]:.3f}")
@@ -232,7 +212,6 @@ def main():
             result = follower.step(P, prev_P, speed_ms=speed)
             prev_P = P
 
-            # Send to Arduino
             send_motor_commands(ser,
                                 result["pwm_L"],
                                 result["pwm_R"],
@@ -240,7 +219,6 @@ def main():
 
             now = datetime.now().isoformat(timespec="milliseconds")
 
-            # Track log
             track_w.writerow({
                 "timestamp"        : now,
                 "easting"          : round(P[0], 4),
@@ -252,7 +230,6 @@ def main():
             })
             track_f.flush()
 
-            # Command log
             command_w.writerow({
                 "timestamp"        : now,
                 "pwm_L"            : result["pwm_L"],
@@ -263,18 +240,15 @@ def main():
             })
             command_f.flush()
 
-            # Read any Arduino echo (non-blocking)
             if ser.in_waiting:
                 echo = ser.readline().decode("ascii", errors="replace").strip()
                 if echo.startswith("ERR"):
                     print(f"  [Arduino] {echo}")
 
-            # HDOP warning
             info = gnss.get_fix_info()
             if info["hdop"] > HDOP_WARN:
                 print(f"  [GPS] HDOP={info['hdop']:.1f} — fix quality poor")
 
-            # Status line
             arm_str = "ON " if result["paint_arm"] else "OFF"
             print(f"  L={result['pwm_L']:3d} R={result['pwm_R']:3d} | "
                   f"ARM={arm_str} | "
@@ -286,7 +260,6 @@ def main():
             if result["status"] == "finished":
                 break
 
-            # Hold loop rate
             elapsed = time.time() - loop_start
             sleep_t = LOOP_DT - elapsed
             if sleep_t > 0:
