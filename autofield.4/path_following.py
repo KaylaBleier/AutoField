@@ -44,6 +44,11 @@ WHEELBASE             = CFG["follower"]["wheelbase_m"]
 HEADING_ARM_THRESHOLD = CFG["follower"]["heading_arm_threshold"]   # degrees
 WP_ACCEPT_RADIUS      = CFG["control"]["wp_accept_radius"]
 
+# Minimum distance the rover must move between ticks for the GPS-derived
+# heading to be trusted. Below this, atan2 returns noise.
+# At 5Hz loop rate and ~0.5m/s speed, rover moves ~0.1m per tick.
+MIN_HEADING_DIST = 0.10  # metres
+
 
 # ---------------------------------------------------------------------------
 # Geometry helpers
@@ -145,8 +150,17 @@ class PathFollower:
             self._finished = True
             return _stopped_result(reason)
 
-        # Heading from GPS motion
-        actual_heading = _heading_from_points(prev_P, P)
+        # Heading from GPS motion — only trust it if rover moved enough
+        # for atan2 to give a meaningful direction. Below the threshold,
+        # fall back to the intended heading (set carefully during nudge).
+        dist_moved = _distance(prev_P, P)
+        if dist_moved >= MIN_HEADING_DIST:
+            actual_heading = _heading_from_points(prev_P, P)
+            self._last_good_heading = actual_heading
+        else:
+            # GPS hasn't moved enough — use last known good heading,
+            # or intended heading if we've never had a good reading yet
+            actual_heading = getattr(self, '_last_good_heading', self.heading_rad)
 
         # Errors
         head_err = _normalize_angle(self.heading_rad - actual_heading)
