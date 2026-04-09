@@ -320,6 +320,8 @@ def main():
                   f"spd={speed:.2f}m/s")
 
             if result["status"] == "finished":
+                reason = result.get("stop_reason", "")
+                print(f"[Main] Run complete — {reason}")
                 break
 
             elapsed = time.time() - loop_start
