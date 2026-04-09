@@ -1,0 +1,49 @@
+# config.yaml
+# Central configuration for the rover system.
+# Edit this file to change ports, baud rates, and tuning parameters.
+# All values are read at startup by main.py — no other files need editing.
+# make sure to have "pip install pyyaml" installed
+
+# ---------------------------------------------------------------------------
+# Serial ports
+# ---------------------------------------------------------------------------
+serial:
+  gnss_port:    "COM5"     # GPS rover module
+  gnss_baud:    57600
+
+  arduino_port: "COM15"    # Arduino motor controller
+  arduino_baud: 9600
+
+# ---------------------------------------------------------------------------
+# GPS / fix quality
+# ---------------------------------------------------------------------------
+gps:
+  fix_timeout_s:   60      # Seconds to wait for initial fix before aborting
+  min_fix_quality: 1       # 1=GPS, 2=DGPS, 4=RTK fixed, 5=RTK float
+  hdop_warn:       3.0     # Print warning if HDOP exceeds this value
+  num_samples:     5       # Averaged fixes for wp1 and nudge fix2
+  min_nudge_dist:  0.3     # Minimum nudge distance (m) to trust heading
+
+# ---------------------------------------------------------------------------
+# Control loop
+# ---------------------------------------------------------------------------
+control:
+  loop_hz:          5      # Control loop update rate (cycles per second)
+  wp_accept_radius: 0.8    # Distance (m) at which wp2 is considered reached
+
+# ---------------------------------------------------------------------------
+# Path follower tuning
+# ---------------------------------------------------------------------------
+follower:
+  base_speed_pwm:        180   # Nominal forward PWM (0–255)
+  max_steer_pwm:          80   # Max PWM differential between left and right
+  k_heading:             1.2   # Gain on heading error
+  k_lateral:             0.6   # Gain on lateral error
+  wheelbase_m:           0.6   # Left-to-right wheel separation (metres)
+  heading_arm_threshold: 10.0  # Degrees within which paint arm activates
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  log_dir: "logs"          # Directory for track and command CSV logs
