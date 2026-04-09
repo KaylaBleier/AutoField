@@ -70,6 +70,66 @@ COMMAND_FIELDS = [
     "heading_error_deg", "lateral_error_m",
 ]
 
+SESSION_FIELDS = [
+    "key", "value",
+]
+
+
+def write_session_log(stamp: str,
+                      wp1: tuple, wp2: tuple, heading_rad: float,
+                      fix_info: dict):
+    """
+    Write a one-time session log capturing everything the rover was told:
+      - wp1, wp2 coordinates
+      - intended heading
+      - GPS fix quality at run start
+      - all config values used
+
+    This lets you reconstruct post-run what the rover believed vs what
+    it actually did (from track_log and command_log).
+    """
+    import math as _math
+    os.makedirs(LOG_DIR, exist_ok=True)
+    path = os.path.join(LOG_DIR, f"session_log_{stamp}.csv")
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=SESSION_FIELDS)
+        w.writeheader()
+
+        rows = [
+            # Waypoints
+            ("wp1_easting_m",         round(wp1[0], 4)),
+            ("wp1_northing_m",        round(wp1[1], 4)),
+            ("wp2_easting_m",         round(wp2[0], 4)),
+            ("wp2_northing_m",        round(wp2[1], 4)),
+            ("intended_heading_deg",  round(_math.degrees(heading_rad), 3)),
+            ("intended_heading_rad",  round(heading_rad, 6)),
+            ("run_length_m",          round(
+                _math.sqrt((wp2[0]-wp1[0])**2 + (wp2[1]-wp1[1])**2), 4)),
+            # GPS fix quality at run start
+            ("fix_quality_at_start",  fix_info.get("fix_quality", "?")),
+            ("num_sats_at_start",     fix_info.get("num_sats",    "?")),
+            ("hdop_at_start",         fix_info.get("hdop",        "?")),
+            # Config snapshot — so old logs stay interpretable after tuning
+            ("cfg_gnss_port",         CFG["serial"]["gnss_port"]),
+            ("cfg_gnss_baud",         CFG["serial"]["gnss_baud"]),
+            ("cfg_arduino_port",      CFG["serial"]["arduino_port"]),
+            ("cfg_arduino_baud",      CFG["serial"]["arduino_baud"]),
+            ("cfg_loop_hz",           CFG["control"]["loop_hz"]),
+            ("cfg_wp_accept_radius",  CFG["control"]["wp_accept_radius"]),
+            ("cfg_base_speed_pwm",    CFG["follower"]["base_speed_pwm"]),
+            ("cfg_max_steer_pwm",     CFG["follower"]["max_steer_pwm"]),
+            ("cfg_k_heading",         CFG["follower"]["k_heading"]),
+            ("cfg_k_lateral",         CFG["follower"]["k_lateral"]),
+            ("cfg_heading_arm_threshold", CFG["follower"]["heading_arm_threshold"]),
+            ("cfg_num_samples",       CFG["gps"]["num_samples"]),
+            ("cfg_min_nudge_dist",    CFG["gps"]["min_nudge_dist"]),
+        ]
+        for key, value in rows:
+            w.writerow({"key": key, "value": value})
+
+    print(f"[Log] session_log  → {path}")
+    return path
+
 
 # ---------------------------------------------------------------------------
 # GPS fix confirmation
@@ -189,8 +249,10 @@ def main():
     input("\n[Main] Press ENTER to start the rover ...\n")
 
     # ------------------------------------------------------------------
-    # Open logs
+    # Open logs — session log written before rover moves
     # ------------------------------------------------------------------
+    stamp        = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_path = write_session_log(stamp, wp1, wp2, heading_rad, gnss.get_fix_info())
     track_f,   track_w,   track_path   = _make_logger("track_log",   TRACK_FIELDS)
     command_f, command_w, command_path = _make_logger("command_log", COMMAND_FIELDS)
 
@@ -276,8 +338,9 @@ def main():
         track_f.close()
         command_f.close()
         ser.close()
-        print(f"[Main] Track log  : {track_path}")
-        print(f"[Main] Command log: {command_path}")
+        print(f"[Main] Session log : {session_path}")
+        print(f"[Main] Track log   : {track_path}")
+        print(f"[Main] Command log : {command_path}")
         print("[Main] Done.\n")
 
 
