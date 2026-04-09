@@ -2,7 +2,6 @@
 # Central configuration for the rover system.
 # Edit this file to change ports, baud rates, and tuning parameters.
 # All values are read at startup by main.py — no other files need editing.
-# make sure to have "pip install pyyaml" installed
 
 # ---------------------------------------------------------------------------
 # Serial ports
@@ -41,6 +40,15 @@ follower:
   k_lateral:             0.6   # Gain on lateral error
   wheelbase_m:           0.6   # Left-to-right wheel separation (metres)
   heading_arm_threshold: 10.0  # Degrees within which paint arm activates
+
+# ---------------------------------------------------------------------------
+# Encoder stop (dead reckoning)
+# ---------------------------------------------------------------------------
+encoder:
+  pulses_per_rev:      20      # Encoder pulses per full wheel revolution
+  wheel_circumference: 0.471   # Wheel circumference in metres (diameter_m * pi)
+  brake_margin_m:      0.15    # Stop this many metres early to allow braking
+  cross_guard_m:       0.05    # Min dot-product change to confirm sign flip
 
 # ---------------------------------------------------------------------------
 # Logging
