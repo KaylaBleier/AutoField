@@ -28,7 +28,7 @@ import math
 # ---------------------------------------------------------------------------
 # Re-use the parsers already written in manual_waypoint_gen
 # ---------------------------------------------------------------------------
-from manual_waypoint_gen import parse_gga, latlon_to_utm
+from gps_utils import parse_gga, latlon_to_utm
 
 
 # ---------------------------------------------------------------------------
