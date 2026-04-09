@@ -82,12 +82,26 @@ def _lateral_error(wp1: tuple, wp2: tuple, P: tuple) -> float:
 # PathFollower
 # ---------------------------------------------------------------------------
 
+def _wp2_cross(wp1: tuple, wp2: tuple, P: tuple) -> float:
+    """
+    Cross product of the path vector (wp1→wp2) with the vector (wp1→P).
+    Sign flips when P crosses the perpendicular plane through wp2.
+    Positive = P is still before wp2 along the path.
+    Negative = P has passed wp2.
+    """
+    dx = wp2[0] - wp1[0]
+    dy = wp2[1] - wp1[1]
+    # Project P onto path axis — negative when rover is past wp2
+    return dx * (wp2[0] - P[0]) + dy * (wp2[1] - P[1])
+
+
 class PathFollower:
     def __init__(self, wp1: tuple, wp2: tuple, heading_rad: float):
         self.wp1         = wp1
         self.wp2         = wp2
         self.heading_rad = heading_rad
         self._finished   = False
+        self._prev_cross = None   # sign of cross product on last tick
 
     def is_finished(self) -> bool:
         return self._finished
@@ -100,14 +114,36 @@ class PathFollower:
             return 0.0
         return ((P[0] - self.wp1[0]) * dx + (P[1] - self.wp1[1]) * dy) / denom
 
+    def _check_arrival(self, P: tuple) -> tuple:
+        """
+        Two independent stop conditions — either is sufficient:
+          1. Distance to wp2 falls within WP_ACCEPT_RADIUS
+          2. Cross-product sign flips (rover passed the wp2 perpendicular plane)
+
+        Returns (arrived: bool, reason: str)
+        """
+        dist = _distance(P, self.wp2)
+        if dist <= WP_ACCEPT_RADIUS:
+            return True, f"within accept radius ({dist:.2f} m)"
+
+        cross = _wp2_cross(self.wp1, self.wp2, P)
+        if self._prev_cross is not None:
+            if self._prev_cross > 0 and cross <= 0:
+                return True, f"passed wp2 (cross-product sign flip, dist={dist:.2f} m)"
+
+        self._prev_cross = cross
+        return False, ""
+
     def step(self, P: tuple, prev_P: tuple, speed_ms: float = 0.5) -> dict:
         if self._finished:
             return _stopped_result()
 
-        # Arrival check
-        if _distance(P, self.wp2) <= WP_ACCEPT_RADIUS:
+        # Arrival check — distance OR cross-product sign flip
+        arrived, reason = self._check_arrival(P)
+        if arrived:
+            print(f"[PathFollower] Arrived at wp2 — {reason}")
             self._finished = True
-            return _stopped_result()
+            return _stopped_result(reason)
 
         # Heading from GPS motion
         actual_heading = _heading_from_points(prev_P, P)
@@ -141,7 +177,7 @@ class PathFollower:
         }
 
 
-def _stopped_result() -> dict:
+def _stopped_result(reason: str = "") -> dict:
     return {
         "pwm_L"        : 0,
         "pwm_R"        : 0,
@@ -150,4 +186,5 @@ def _stopped_result() -> dict:
         "lateral_error": 0.0,
         "t"            : 1.0,
         "status"       : "finished",
+        "stop_reason"  : reason,
     }
