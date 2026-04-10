@@ -26,6 +26,9 @@
 //    Units match whatever units you calibrated speed in (inches)
 // ============================================================
 
+#include <Servo.h>
+Servo paintArm;
+
 // ── Pin Definitions ─────────────────────────────────────────
 // Left side
 const int PWM_FL = 5;
@@ -39,12 +42,19 @@ const int DIR_FR = 8;
 const int PWM_BR = 6;
 const int DIR_BR = 7;
 
+// Servo
+const int SERVO_PIN   = 12;
+const int SERVO_UP    = -20;  // arm raised (boot, turn, reverse)
+const int SERVO_DOWN  =  40;  // arm lowered (driving straight)
+const int SERVO_SPEED =  15;  // ms per degree step
+
 // ── Rover Constants ──────────────────────────────────────────
 const float WHEEL_DIAMETER_IN = 7.198;
 const float WHEEL_BASE_IN     = 15.95;
 const float TRACK_WIDTH_IN    = 24.908;
 const float LINEAR_SPEED_IPS  = 23.2;   // inches per second @ PWM 100
 const int   DRIVE_PWM         = 100;
+const float TURN_CORRECTION = 3.1; 
 
 // Derived
 const float WHEEL_CIRC_IN     = PI * WHEEL_DIAMETER_IN;  // ~22.613"
@@ -68,6 +78,9 @@ void moveBackward(float distanceIn);
 void pivotRight90();
 void traceRectangle(float lengthIn, float widthIn);
 float distanceToTime(float distanceIn);
+void servoSweepDown();
+void servoSweepUp();
+void servoDetach();
 
 // ============================================================
 void setup() {
@@ -82,6 +95,13 @@ void setup() {
   }
 
   Serial.println(F("=== Skid-Steer Rectangle Rover ==="));
+
+  // Boot servo into UP position then detach
+  paintArm.attach(SERVO_PIN);
+  paintArm.write(SERVO_UP);
+  delay(600);
+  paintArm.detach();
+
   Serial.println(F("Enter rectangle dimensions as:  length,width"));
   Serial.println(F("Example:  48,24  (inches)"));
   Serial.println(F("Waiting for input..."));
@@ -123,6 +143,21 @@ void parseAndRun(String s) {
   Serial.print(F("Tracing rectangle: "));
   Serial.print(len); Serial.print(F("\" x "));
   Serial.print(wid); Serial.println(F("\""));
+  Serial.println(F("Press Enter to start..."));
+
+  // Wait for user to press Enter
+  while (true) {
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == '\n' || c == '\r') break;
+    }
+  }
+  // Flush any extra CR/LF bytes
+  delay(50);
+  while (Serial.available()) Serial.read();
+
+  Serial.println(F("Starting in 2 seconds..."));
+  delay(2000);
 
   traceRectangle(len, wid);
 
@@ -145,8 +180,15 @@ void traceRectangle(float lengthIn, float widthIn) {
     Serial.print(dist);
     Serial.println(F("\""));
 
+    // Lower arm then detach before driving straight
+    servoSweepDown();
+    servoDetach();
+
     moveForward(dist);
     delay(SETTLE_MS);
+
+    // Raise arm before turn and keep powered through reverse
+    servoSweepUp();
 
     Serial.println(F("  Turning right 90°"));
     pivotRight90();
@@ -160,6 +202,7 @@ void traceRectangle(float lengthIn, float widthIn) {
   }
 
   stopAll();
+  servoDetach();
 }
 
 // ── Drive straight for a given distance ─────────────────────
@@ -180,10 +223,10 @@ void moveBackward(float distanceIn) {
   stopAll();
 }
 
- (inner/right side stops, left side drives)
+// ── Pivot right 90° (inner/right side stops, left side drives)
 //    Arc length outer wheel = (PI/2) * TRACK_WIDTH_IN
 void pivotRight90() {
-  float arcLength = (PI / 2.0) * TRACK_WIDTH_IN;  // ~19.57"
+  float arcLength = (PI / 2.0) * TRACK_WIDTH_IN * TURN_CORRECTION;  
   unsigned long tMs = (unsigned long)(distanceToTime(arcLength) * 1000.0);
 
   driveLeft(DRIVE_PWM);   // outer (left) drives
@@ -225,6 +268,34 @@ void driveRightReverse(int pwm) {
 void stopAll() {
   analogWrite(PWM_FL, 0);  analogWrite(PWM_BL, 0);
   analogWrite(PWM_FR, 0);  analogWrite(PWM_BR, 0);
+}
+
+// ============================================================
+//  SERVO HELPERS
+//  Sweeps between SERVO_UP (-20°) and SERVO_DOWN (40°)
+//  Servo is detached while driving to avoid jitter/current draw
+// ============================================================
+
+void servoSweepDown() {
+  paintArm.attach(SERVO_PIN);
+  for (int p = SERVO_UP; p <= SERVO_DOWN; p++) {
+    paintArm.write(p);
+    delay(SERVO_SPEED);
+  }
+  // leave attached until caller calls servoDetach()
+}
+
+void servoSweepUp() {
+  paintArm.attach(SERVO_PIN);
+  for (int p = SERVO_DOWN; p >= SERVO_UP; p--) {
+    paintArm.write(p);
+    delay(SERVO_SPEED);
+  }
+  // stays powered/attached through turn + reverse
+}
+
+void servoDetach() {
+  paintArm.detach();
 }
 
 // ============================================================
